@@ -315,3 +315,48 @@ class TestManualCapturePolicy:
         assert orch._awaiting_clear_scene is True
         available, _phase, _msg = orch._manual_status()
         assert available is True
+
+
+class TestWaitsForRealDocument:
+    @pytest.mark.asyncio
+    async def test_empty_scene_after_detection_returns_to_idle_without_failure(self, app_config):
+        orch = _orch(app_config)
+        orch.sm.state = AppState.WAITING_FOR_STABILITY
+        orch._begin_transaction(trigger="auto")
+        orch._safe_preview = AsyncMock(return_value=_empty_frame())
+        orch.stability.update = MagicMock(return_value=False)
+
+        for _ in range(orch.DOCUMENT_LOSS_FRAMES):
+            await orch._stability_tick()
+
+        assert orch.sm.state == AppState.IDLE
+        assert orch._transaction is None
+        assert orch._consecutive_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_document_in_view_keeps_pipeline_running(self, app_config):
+        orch = _orch(app_config)
+        orch.sm.state = AppState.WAITING_FOR_STABILITY
+        orch._begin_transaction(trigger="auto")
+        orch.detector.update_baseline(_empty_frame())
+        orch._safe_preview = AsyncMock(return_value=_document_frame())
+        orch.stability.update = MagicMock(return_value=False)
+
+        for _ in range(orch.DOCUMENT_LOSS_FRAMES + 1):
+            await orch._stability_tick()
+
+        assert orch.sm.state != AppState.IDLE
+        assert orch._transaction is not None
+
+    @pytest.mark.asyncio
+    async def test_auto_capture_without_geometry_does_not_lock_a_fake_region(self, app_config):
+        orch = _orch(app_config)
+        orch.sm.state = AppState.DOCUMENT_DETECTED
+        orch._begin_transaction(trigger="auto")
+        orch._safe_preview = AsyncMock(return_value=_empty_frame())
+
+        await orch._document_detected_tick()
+
+        assert orch.sm.state == AppState.IDLE
+        assert not orch.detector.lock.is_locked
+        assert orch._transaction is None

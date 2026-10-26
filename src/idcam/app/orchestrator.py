@@ -70,6 +70,8 @@ class ApplicationOrchestrator:
 
     # Failed attempts retried automatically while the same document stays in view.
     MAX_AUTO_RETRIES_WITH_DOCUMENT = 2
+    # Consecutive empty-scene frames before a locked document counts as removed.
+    DOCUMENT_LOSS_FRAMES = 3
 
     def __init__(self, config: AppConfig, *, use_mock_camera: bool = False) -> None:
         self.config = config
@@ -112,6 +114,7 @@ class ApplicationOrchestrator:
         self._clear_scene_count = 0
         self._awaiting_removal_log_count = 0
         self._consecutive_failures = 0
+        self._presence_misses = 0
         self._last_scene_empty = False
         self._last_transition_reason = ""
         self._capture_started = False
@@ -339,6 +342,8 @@ class ApplicationOrchestrator:
             return False
         if not self.detector.lock.is_locked:
             return True
+        if await self._abort_if_document_gone(frame):
+            return False
         motion = self.detector.structural_motion_in_lock(frame)
         threshold = self.config.detection.motion_threshold * 2.5
         self._publish_debug(frame)
@@ -451,6 +456,7 @@ class ApplicationOrchestrator:
         self._capture_started = False
         self._upload_started = False
         self._upload_result = ""
+        self._presence_misses = 0
         set_log_context(capture_id=txn.capture_id)
         logger.info("event=transaction_started capture_id=%s trigger=%s", txn.capture_id, trigger)
         return txn
@@ -543,20 +549,49 @@ class ApplicationOrchestrator:
         if not self._claim_state_action():
             return
         frame = await self._safe_preview()
+        manual = bool(self._transaction and self._transaction.trigger == "manual")
         if frame is not None:
-            self.detector.lock_document(frame)
+            locked = self.detector.lock_document(frame, allow_fallback=manual)
+            if not locked:
+                # Nothing real to lock: go back to waiting for a document instead of
+                # stabilising/focusing/capturing an empty scene.
+                self._abort_transaction("no_document_geometry")
+                self._clear_transaction()
+                self._transition(AppState.IDLE, reason="document_not_confirmed")
+                return
             self.stability.set_roi(self.detector.lock.roi)
             self._publish_debug(frame)
             logger.info("event=pipeline_stage stage=document_locked roi=%s", self.detector.lock.roi)
-        if self._transaction and self._transaction.trigger == "manual":
+        if manual:
             self._set_manual_phase("focusing", "Focusing...")
             self._transition(AppState.FOCUSING, reason="manual_capture_skip_stability")
             return
         self._transition(AppState.WAITING_FOR_STABILITY, reason="auto_wait_stability")
 
+    async def _abort_if_document_gone(self, frame) -> bool:
+        """Back to IDLE (no failure counted) when the locked document has left the scene.
+
+        The pipeline must only continue while a document is actually in view: stability,
+        focus and capture all treat an empty table as perfectly "stable".
+        """
+        if self._transaction is None or self._transaction.trigger == "manual":
+            return False
+        empty = await asyncio.to_thread(self.detector.is_scene_empty, frame)
+        self._presence_misses = self._presence_misses + 1 if empty else 0
+        if self._presence_misses < self.DOCUMENT_LOSS_FRAMES:
+            return False
+        logger.warning("event=document_lost state=%s frames=%d", self.sm.state.value, self._presence_misses)
+        self._presence_misses = 0
+        self._abort_transaction("document_removed")
+        self._clear_transaction()
+        self._transition(AppState.IDLE, reason="document_removed_before_capture")
+        return True
+
     async def _stability_tick(self) -> None:
         frame = await self._safe_preview()
         if frame is None:
+            return
+        if await self._abort_if_document_gone(frame):
             return
         if self.stability.update(frame):
             self._publish_debug(frame)
@@ -582,6 +617,8 @@ class ApplicationOrchestrator:
         # Lens motion during AF must not be treated as the document moving.
         frame = await self._safe_preview()
         if frame is None:
+            return
+        if await self._abort_if_document_gone(frame):
             return
         preview_roi = self.detector.focus_preview_roi(frame)
         self._publish_debug(frame)

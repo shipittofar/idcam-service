@@ -160,8 +160,16 @@ class DocumentDetector:
             return inner_roi(roi, self.config.focus_roi_inset_fraction, frame.shape)
         return self.roi_rect()
 
-    def lock_document(self, frame: np.ndarray) -> bool:
+    def lock_document(self, frame: np.ndarray, allow_fallback: bool = True) -> bool:
+        """Lock the detected document. Without geometry: fake centre region, or False if not allowed.
+
+        Automatic captures must pass ``allow_fallback=False``: locking an invented region would
+        focus and capture an empty table. Only a user-requested manual capture may fall back.
+        """
         geom = self._last_geometry or self._find_geometry(frame)
+        if geom is None and not allow_fallback:
+            logger.warning("event=document_lock_failed reason=no_geometry")
+            return False
         if geom is None:
             logger.warning("event=document_lock_fallback reason=no_geometry")
             h, w = frame.shape[:2]
