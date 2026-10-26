@@ -124,6 +124,17 @@ def normalize_picamera_preview_frame(frame: np.ndarray) -> np.ndarray:
     return frame
 
 
+def _boottime_ns() -> int | None:
+    """Now on the clock libcamera uses for SensorTimestamp (None when unavailable, e.g. Windows)."""
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        return None
+    try:
+        return time.clock_gettime_ns(clock)
+    except (OSError, AttributeError):
+        return None
+
+
 class CameraManager:
     """
     Manages Picamera2 lifecycle: preview stream and full-res capture.
@@ -144,6 +155,8 @@ class CameraManager:
         # Lens position we last commanded manually. capture_metadata() lags the command, so the
         # still must use this value, not a metadata read (logs: still at 8.38 after parking at 8.17).
         self._held_lens: float | None = None
+        # LensPosition reported in the metadata of the last frame from capture_fresh_preview_array.
+        self.last_fresh_lens: float | None = None
 
     @property
     def is_mock(self) -> bool:
@@ -232,6 +245,43 @@ class CameraManager:
                 self._logged_preview_format = True
             return frame
 
+    def capture_fresh_preview_array(self, timeout_sec: float = 2.0) -> np.ndarray:
+        """First preview frame whose exposure started after this call.
+
+        capture_array() returns the oldest queued frame, i.e. one exposed before a lens move that
+        was just commanded. Focus measurements on such frames lag one position behind (a sweep
+        then reported 4 dioptres of lens travel with flat sharpness).
+        """
+        with self._lock:
+            if not self._started:
+                raise CameraError("Camera not started")
+            if self._use_mock:
+                return self._mock_frame()
+            assert self._picam2 is not None
+            t0 = _boottime_ns()
+            if t0 is None:
+                return self.capture_preview_array()
+            deadline = time.monotonic() + timeout_sec
+            native = None
+            try:
+                while native is None:
+                    request = self._picam2.capture_request()
+                    try:
+                        meta = request.get_metadata()
+                        stamp = meta.get("SensorTimestamp")
+                        if stamp is None or stamp >= t0 or time.monotonic() >= deadline:
+                            native = np.array(request.make_array("main"))
+                            lens = meta.get("LensPosition")
+                            self.last_fresh_lens = float(lens) if lens is not None else None
+                    finally:
+                        request.release()
+            except CameraError:
+                raise
+            except Exception:
+                logger.warning("event=fresh_preview_unavailable using=capture_array", exc_info=True)
+                return self.capture_preview_array()
+            return normalize_picamera_preview_frame(native)
+
     def capture_still_to_file(self, path: Path) -> None:
         with self._lock:
             if not self._started:
@@ -245,7 +295,17 @@ class CameraManager:
             try:
                 self._picam2.stop()
                 self._picam2.configure(self._still_config)
+                if lens_position is not None:
+                    # Queue the lens command before streaming starts so the first frames already
+                    # have it; setting it only after start() let the lens travel during the capture.
+                    self._set_controls_unlocked(
+                        {
+                            "AfMode": self._af_mode_manual(),
+                            "LensPosition": float(lens_position),
+                        }
+                    )
                 self._picam2.start()
+                ready_ns = _boottime_ns()
                 if lens_position is not None:
                     self._set_controls_unlocked(
                         {
@@ -257,11 +317,8 @@ class CameraManager:
                         "event=autofocus_result method=hold_lens_position lens_position=%s",
                         lens_position,
                     )
-                    try:
-                        self._picam2.capture_metadata()
-                    except Exception:
-                        logger.debug("event=still_pre_capture_metadata_failed", exc_info=True)
-                self._picam2.capture_file(str(path), format="jpeg")
+                if not self._save_fresh_still(path, ready_ns):
+                    self._picam2.capture_file(str(path), format="jpeg")
             finally:
                 try:
                     self._picam2.stop()
@@ -274,6 +331,39 @@ class CameraManager:
                 except Exception as exc:
                     logger.error("Failed to restore preview mode: %s", exc)
                     raise CameraError(f"Failed to restore preview after capture: {exc}") from exc
+
+    def _save_fresh_still(self, path: Path, ready_ns: int | None) -> bool:
+        """Save the first still exposed after the lens had ``still_lens_settle_sec`` to arrive.
+
+        Returns False when the request API is unavailable, so the caller falls back to
+        ``capture_file``.
+        """
+        if ready_ns is None or self._picam2 is None:
+            return False
+        settle_ns = int(float(self.config.still_lens_settle_sec) * 1e9)
+        deadline = time.monotonic() + 8.0 + float(self.config.still_lens_settle_sec)
+        try:
+            while True:
+                request = self._picam2.capture_request()
+                try:
+                    meta = request.get_metadata()
+                    stamp = meta.get("SensorTimestamp")
+                    if stamp is None or stamp >= ready_ns + settle_ns or time.monotonic() >= deadline:
+                        request.save("main", str(path), format="jpeg")
+                        logger.info(
+                            "event=still_capture_metadata exposure_us=%s analogue_gain=%s lens_position=%s "
+                            "frame_age_ms=%s",
+                            meta.get("ExposureTime"),
+                            meta.get("AnalogueGain"),
+                            meta.get("LensPosition"),
+                            int((stamp - ready_ns) / 1e6) if stamp is not None else None,
+                        )
+                        return True
+                finally:
+                    request.release()
+        except Exception:
+            logger.warning("event=still_fresh_capture_failed using=capture_file", exc_info=True)
+            return False
 
     def get_controls(self) -> dict[str, Any]:
         """Return advertised control *capabilities* (typically min/max/default), not live values."""

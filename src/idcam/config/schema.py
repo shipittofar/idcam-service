@@ -87,6 +87,9 @@ class CameraConfig(BaseModel):
     af_wide_max: float = Field(16.0, ge=0, le=32)
     af_wide_step: float = Field(1.0, gt=0.1, le=4.0)
     capture_timeout_sec: float = Field(45.0, gt=0, le=300)
+    # Time for the lens to reach the held position after the still stream starts; the saved
+    # frame is the first one exposed after this.
+    still_lens_settle_sec: float = Field(0.35, ge=0.0, le=3.0)
     recovery: CameraRecoveryConfig = CameraRecoveryConfig()
 
     @property

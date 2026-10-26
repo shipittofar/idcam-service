@@ -190,7 +190,8 @@ class AutofocusController:
             method, _ = await self._run_hardware_af(camera, attempt)
             self.debug.method = method
 
-            after_frame = await asyncio.to_thread(camera.capture_preview_array)
+            fresh = getattr(camera, "capture_fresh_preview_array", None)
+            after_frame = await asyncio.to_thread(fresh if callable(fresh) else camera.capture_preview_array)
             after = preview_sharpness(after_frame, roi=roi)
             meta_after = self._read_metadata(camera)
             lens_after = meta_after.get("LensPosition")
@@ -274,6 +275,7 @@ class AutofocusController:
         max_points = int(self.config.af_refine_max_points)
         start = min(max(float(lens_start), lo), hi)
         pts: dict[float, float] = {}
+        fresh_frame = getattr(camera, "capture_fresh_preview_array", None)
 
         def clamp(pos: float) -> float:
             return round(min(max(pos, lo), hi), 3)
@@ -282,10 +284,13 @@ class AutofocusController:
             pos = clamp(pos)
             await asyncio.to_thread(setter, pos)
             await asyncio.sleep(settle)
-            # Frames queued before the lens arrived would be measured as this position.
-            for _ in range(discard):
-                await asyncio.to_thread(camera.capture_preview_array)
-            frame = await asyncio.to_thread(camera.capture_preview_array)
+            if callable(fresh_frame):
+                # First frame exposed after the settle time: never one queued before the lens arrived.
+                frame = await asyncio.to_thread(fresh_frame)
+            else:
+                for _ in range(discard):
+                    await asyncio.to_thread(camera.capture_preview_array)
+                frame = await asyncio.to_thread(camera.capture_preview_array)
             pts[pos] = float(preview_sharpness(frame, roi=roi))
             return pts[pos]
 
@@ -352,7 +357,15 @@ class AutofocusController:
             best = max(pts, key=lambda p: pts[p])
             # Park on the winner and confirm with a fresh reading: the last measured position
             # is rarely the best one, and the lens needs time to get there.
+            claimed = pts[best]
             await measure(best)
+            if pts[best] < 0.6 * claimed:
+                # The same lens position now reads far softer than when it won: the page moved
+                # (or the earlier reading was stale), so this focus cannot be trusted.
+                raise AutofocusError(
+                    f"Focus unstable at lens {best:.2f}: sharpness {claimed:.0f} then {pts[best]:.0f} "
+                    f"(document moved?)"
+                )
             logger.info(
                 "event=autofocus_refined start=%.2f final=%.2f sharpness_start=%.1f sharpness_final=%.1f "
                 "samples=%d curve=%s",

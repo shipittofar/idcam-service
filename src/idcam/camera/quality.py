@@ -156,7 +156,10 @@ class ImageValidator:
             f"{focus_ratio:.2f}" if focus_ratio is not None else None,
         )
 
-        if sharpness < self.config.min_sharpness:
+        # With a document box, only the document counts: the global figure is dominated by the
+        # desk, so a sharp page (document 174) failed on global 46. Global is the fallback when
+        # no box is available.
+        if document_roi is None and sharpness < self.config.min_sharpness:
             raise ImageValidationError(
                 f"Image too blurry (global): sharpness={sharpness:.1f} min={self.config.min_sharpness:.1f}"
             )

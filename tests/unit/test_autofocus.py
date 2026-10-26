@@ -371,3 +371,34 @@ class TestNoFocusPeak:
 
         with pytest.raises(AutofocusError, match="No focus peak"):
             await ctl.run_autofocus(camera, sharpness_threshold=1.0)
+
+
+class _ScenechangeCamera(_LensCamera):
+    """Page is sharp until the confirming reading, then it moves (everything turns soft)."""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.frames = 0
+
+    def capture_preview_array(self) -> np.ndarray:
+        import cv2
+
+        self.frames += 1
+        sigma = 0.3 + 2.0 * abs(self.lens - self.peak)
+        if self.frames > 60:
+            sigma += 6.0
+        return cv2.GaussianBlur(_sharp_frame(), (0, 0), sigma)
+
+
+class TestUnstableFocus:
+    @pytest.mark.asyncio
+    async def test_reading_that_collapses_at_confirmation_fails_focus(self):
+        camera = _ScenechangeCamera(start=8.0, peak=8.6)
+        cfg = CameraConfig(af_timeout_sec=1.0, af_max_retries=1, af_refine_settle_sec=0.05, af_refine_discard_frames=1)
+        ctl = AutofocusController(cfg)
+        ctl.probe_capabilities(camera)
+        # frames before ~60 are consistent; make the confirmation land after the page "moved"
+        camera.frames = 55
+
+        with pytest.raises(AutofocusError, match="unstable|No focus peak"):
+            await ctl.run_autofocus(camera, sharpness_threshold=1.0)

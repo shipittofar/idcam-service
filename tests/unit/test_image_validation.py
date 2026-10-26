@@ -110,3 +110,33 @@ class TestLargeStillValidation:
         self._page(path)
         result = ImageValidator(QualityConfig(min_file_bytes=1000)).validate(path, reference_sharpness=100.0)
         assert result.focus_ratio is not None and result.focus_ratio > 0
+
+
+class TestDocumentJudgedByDocumentSharpness:
+    PREVIEW = (1450, 1100)
+    CROP = (0, 0, 5800, 4400)  # preview scale 4 -> full-resolution still
+    DOC = (450, 300, 550, 425)  # = still (1800, 1200, 2200, 1700)
+
+    def test_sharp_document_passes_even_when_global_sharpness_is_low(self, tmp_path):
+        path = tmp_path / "sharp_doc.jpg"
+        TestLargeStillValidation._page(path)
+        cfg = QualityConfig(min_file_bytes=1000, min_sharpness=1e9)  # global can never pass
+        result = ImageValidator(cfg).validate(
+            path, document_roi=self.DOC, preview_size=self.PREVIEW, scaler_crop=self.CROP
+        )
+        assert result.document_sharpness >= cfg.min_document_sharpness
+
+    def test_without_a_document_box_global_sharpness_still_applies(self, tmp_path):
+        path = tmp_path / "sharp_nodoc.jpg"
+        TestLargeStillValidation._page(path)
+        cfg = QualityConfig(min_file_bytes=1000, min_sharpness=1e9)
+        with pytest.raises(ImageValidationError, match="global"):
+            ImageValidator(cfg).validate(path)
+
+    def test_blurry_document_is_rejected(self, tmp_path):
+        path = tmp_path / "blur_doc.jpg"
+        TestLargeStillValidation._page(path, blur_sigma=8.0)
+        with pytest.raises(ImageValidationError, match="Document region too blurry"):
+            ImageValidator(QualityConfig(min_file_bytes=1000)).validate(
+                path, document_roi=self.DOC, preview_size=self.PREVIEW, scaler_crop=self.CROP
+            )
