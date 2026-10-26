@@ -222,9 +222,9 @@ class TestUploadRetries:
     async def test_total_timeout_bounds_retries(self, transaction):
         config = AppConfig(
             device_id="test-pi",
-            server=ServerConfig(url="https://api.example.com", total_timeout_sec=0.05, retry_backoff_sec=5.0),
+            server=ServerConfig(url="https://api.example.com", total_timeout_sec=0.05, max_attempts=10),
         )
         route = respx.post(URL).mock(side_effect=httpx.ReadTimeout("slow"))
         response = await _upload(config, transaction)
         assert not response.success
-        assert route.call_count == 1  # next backoff would pass the deadline
+        assert route.call_count < 10  # the deadline, not max_attempts, ended the retries

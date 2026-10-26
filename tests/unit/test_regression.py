@@ -149,8 +149,10 @@ class TestNetworkRegression:
             side_effect=httpx.ReadTimeout("slow")
         )
         from idcam.network.api_client import ApiClient
+        from idcam.network.retry_policy import RetryPolicy
 
-        client = ApiClient(app_config)
+        # Policy without after-send retries (server.retry_after_send=false): one POST only.
+        client = ApiClient(app_config, RetryPolicy(max_connection_retries=3, retry_after_send=False))
         await client.start()
         resp = await client.upload_document(UploadRequest("cap-1", "reg-test", str(img), "now"))
         await client.stop()
