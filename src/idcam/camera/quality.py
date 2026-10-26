@@ -66,8 +66,10 @@ class ImageValidator:
 
         try:
             with Image.open(path) as img:
-                img.load()
                 width, height = img.size
+                # 1/8-scale decode still detects truncated data; cv2.imread below does the full decode.
+                img.draft("RGB", (max(1, width // 8), max(1, height // 8)))
+                img.load()
         except Exception as exc:
             raise ImageValidationError(f"JPEG truncated or incomplete: {exc}") from exc
 
@@ -129,7 +131,7 @@ class ImageValidator:
         if brightness > self.config.max_brightness:
             raise ImageValidationError(f"Image too bright: brightness={brightness:.1f}")
 
-        if float(np.std(frame)) < 5.0:
+        if float(np.std(frame[::8, ::8])) < 5.0:  # subsampled: whole-frame std was ~5 s at 64 MP
             raise ImageValidationError("Image appears uniform/corrupted")
 
         result = ValidationResult(

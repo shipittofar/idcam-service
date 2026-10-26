@@ -363,7 +363,7 @@ class ApplicationOrchestrator:
             self._publish_debug(frame)
             self._transition(AppState.DOCUMENT_DETECTED, reason="manual_capture")
             return
-        detected = self.detector.detect(frame)
+        detected = await asyncio.to_thread(self.detector.detect, frame)
         self._publish_debug(frame)
         if self._awaiting_clear_scene and not detected:
             self._last_scene_empty = True
@@ -645,7 +645,8 @@ class ApplicationOrchestrator:
             focus_roi = self.detector.focus_preview_roi()
             preview_size = self._last_preview_size
             scaler_crop = self.camera.current_scaler_crop()
-            result = self.validator.validate(
+            result = await asyncio.to_thread(
+                self.validator.validate,
                 self._capture_path,
                 document_roi=focus_roi,
                 preview_size=preview_size,

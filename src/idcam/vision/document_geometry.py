@@ -141,7 +141,12 @@ def _binary_variants(gray: np.ndarray) -> list[tuple[str, np.ndarray]]:
                 variants.append((f"adaptive_{tag}_b{block}_c{c}", _clean(mask, k15)))
 
     sigma_bg = max(w, h) / 10.0
-    bg = cv2.GaussianBlur(gray, (0, 0), sigmaX=sigma_bg, sigmaY=sigma_bg)
+    # sigma ~ max(w, h)/10 is huge at full resolution; the background is smooth, so
+    # blur a 1/8 downscale and upsample (same result within ~1 grey level, ~300x faster).
+    ds = 8
+    small = cv2.resize(gray, (max(1, w // ds), max(1, h // ds)), interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), sigmaX=sigma_bg / ds, sigmaY=sigma_bg / ds)
+    bg = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
     diff = cv2.absdiff(gray, bg)
     diff = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     for tag, tflag in (("bg_otsu", cv2.THRESH_BINARY), ("bg_otsu_inv", cv2.THRESH_BINARY_INV)):
