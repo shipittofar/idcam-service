@@ -20,6 +20,12 @@ class ServerConfig(BaseModel):
     connect_timeout_sec: float = Field(10.0, gt=0, le=120)
     read_timeout_sec: float = Field(60.0, gt=0, le=600)
     total_timeout_sec: float = Field(90.0, gt=0, le=900)
+    # Attempts per document within total_timeout_sec. Retries reuse the same Idempotency-Key.
+    max_attempts: int = Field(3, ge=1, le=10)
+    retry_backoff_sec: float = Field(2.0, ge=0, le=60)
+    # Also retry after the request may have reached the server (read timeout, dropped
+    # connection, 5xx). Safe only because the server MUST dedupe by Idempotency-Key.
+    retry_after_send: bool = True
     verify_tls: bool = True
     max_upload_bytes: int = Field(50_000_000, gt=0)
 
@@ -140,7 +146,7 @@ class StateTimeoutsConfig(BaseModel):
     focus_verification: float = Field(5.0, gt=0, le=60)
     capturing: float = Field(45.0, gt=0, le=300)
     image_validation: float = Field(10.0, gt=0, le=60)
-    uploading: float = Field(60.0, gt=0, le=600)
+    uploading: float = Field(120.0, gt=0, le=900)  # must exceed server.total_timeout_sec
     waiting_for_server: float = Field(60.0, gt=0, le=600)
     processing_response: float = Field(10.0, gt=0, le=60)
     success: float = Field(5.0, gt=0, le=30)

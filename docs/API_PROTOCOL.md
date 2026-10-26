@@ -51,16 +51,20 @@ Default path: `/api/document`
 
 | Scenario | Client behavior | Server responsibility |
 |----------|-----------------|----------------------|
-| Connection fails before send | Safe to retry once (client does) | N/A |
-| Connection drops after send | **No auto-retry**; mark ambiguous locally | Dedupe by `Idempotency-Key` |
-| Server returns 5xx | Fail transaction; no auto-retry | Idempotent if already processed |
-| Server returns 4xx | Fail transaction; no retry | Reject invalid requests |
+| Connection fails before send | Retry (up to `server.max_attempts`, exponential backoff) | N/A |
+| Connection drops / read timeout after send | Retry with the **same** `Idempotency-Key` when `server.retry_after_send` is true (default); otherwise fail as ambiguous | Dedupe by `Idempotency-Key` |
+| 408 / 429 / 5xx | Retry like above (honours `Retry-After`, max 30 s); after the last attempt fail the transaction | Idempotent if already processed |
+| Other 4xx | Fail transaction; never retried | Reject invalid requests |
+| 2xx with an HTML body | Protocol error (captive portal / proxy page, not the API) | N/A |
+
+All attempts for one document stop at `server.total_timeout_sec`.
 
 ## Delivery Guarantees
 
-- **Client:** at-most-one automatic retry (connection failure only, before request completes)
+- **Client:** up to `server.max_attempts` attempts per document, all with the same `Idempotency-Key`, inside `server.total_timeout_sec`
 - **With server idempotency:** effectively-once processing
-- **NOT claimed:** exactly-once without server-side deduplication
+- **NOT claimed:** exactly-once without server-side deduplication. If your server does not dedupe,
+  set `server.retry_after_send: false` so only never-sent attempts are retried.
 
 ## Response Validation
 
@@ -79,7 +83,8 @@ Mismatch of `capture_id` is treated as a **protocol error** and fails the transa
 |---------|---------|------------|
 | Connect | 10s | `server.connect_timeout_sec` |
 | Read | 60s | `server.read_timeout_sec` |
-| Upload state | 60s | `state_timeouts.uploading` |
+| Total upload (all attempts) | 90s | `server.total_timeout_sec` |
+| Upload state | 120s | `state_timeouts.uploading` |
 | Server wait | 60s | `state_timeouts.waiting_for_server` |
 
 ## Ambiguous Network Failure
