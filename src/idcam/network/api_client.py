@@ -51,6 +51,8 @@ class ApiClient:
             timeout=timeout,
             verify=self.config.server.verify_tls,
             follow_redirects=False,
+            # Keep the TLS connection from the pre-capture warm-up alive until the upload starts.
+            limits=httpx.Limits(keepalive_expiry=60.0),
         )
 
     async def stop(self) -> None:
@@ -68,6 +70,20 @@ class ApiClient:
             return response.status_code < 500
         except httpx.HTTPError:
             return False
+
+    async def prewarm(self) -> None:
+        """Open (and keep) a connection to the server before the upload needs it.
+
+        Best effort and silent: saves the TCP/TLS handshake on the Pi at upload time. Does nothing
+        until the client has been started.
+        """
+        if not self._client:
+            return
+        base = str(self.config.server.url).rstrip("/")
+        try:
+            await self._client.head(base, timeout=3.0)
+        except httpx.HTTPError:
+            pass
 
     @staticmethod
     def _snippet(response: httpx.Response, limit: int = 200) -> str:

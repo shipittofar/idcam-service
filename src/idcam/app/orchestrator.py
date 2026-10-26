@@ -17,6 +17,7 @@ from idcam.camera.autofocus import AutofocusController
 from idcam.camera.capture import CaptureService
 from idcam.camera.manager import CameraManager
 from idcam.camera.quality import ImageValidator
+from idcam.camera.upload_image import prepare_upload_image
 from idcam.config.schema import AppConfig
 from idcam.exceptions import (
     AutofocusError,
@@ -43,6 +44,7 @@ from idcam.system.watchdog import Watchdog
 from idcam.ui.led import LedIndicator
 from idcam.ui.status import StatusPublisher
 from idcam.vision.document_detector import DocumentDetector
+from idcam.vision.sharpness import scale_preview_roi_to_image
 from idcam.vision.stability_detector import StabilityDetector
 
 logger = get_logger("orchestrator")
@@ -115,6 +117,8 @@ class ApplicationOrchestrator:
         self._awaiting_removal_log_count = 0
         self._consecutive_failures = 0
         self._presence_misses = 0
+        self._upload_crop_roi: tuple[int, int, int, int] | None = None
+        self._background: set[asyncio.Task] = set()
         self._last_scene_empty = False
         self._last_transition_reason = ""
         self._capture_started = False
@@ -457,6 +461,7 @@ class ApplicationOrchestrator:
         self._upload_started = False
         self._upload_result = ""
         self._presence_misses = 0
+        self._upload_crop_roi = None
         set_log_context(capture_id=txn.capture_id)
         logger.info("event=transaction_started capture_id=%s trigger=%s", txn.capture_id, trigger)
         return txn
@@ -674,6 +679,9 @@ class ApplicationOrchestrator:
         if not self.disk.can_capture(self.config.storage.capture_reserve_mb):
             await self._fail_transaction_and_wait("storage_full", "Insufficient disk space")
             return
+        # The still takes a few seconds; connect to the server meanwhile.
+        self._background.add(task := asyncio.create_task(self.api.prewarm()))
+        task.add_done_callback(self._background.discard)
         output_path = self.temp_store.create_temp_path()
         self._transaction.mark_capture_started(str(output_path))
         self._capture_started = True
@@ -704,6 +712,7 @@ class ApplicationOrchestrator:
         logger.info("event=pipeline_stage stage=image_validation path=%s", self._capture_path)
         try:
             focus_roi = self.detector.focus_preview_roi()
+            doc_roi = self.detector.document_preview_roi()
             preview_size = self._last_preview_size
             scaler_crop = self.camera.current_scaler_crop()
             result = await asyncio.to_thread(
@@ -714,6 +723,13 @@ class ApplicationOrchestrator:
                 scaler_crop=scaler_crop,
                 reference_sharpness=self._transaction.sharpness_score or None,
             )
+            try:
+                self._upload_crop_roi = scale_preview_roi_to_image(
+                    doc_roi, preview_size, (result.width, result.height), scaler_crop=scaler_crop
+                )
+            except Exception:
+                logger.warning("event=upload_crop_roi_failed", exc_info=True)
+                self._upload_crop_roi = None
             self._transaction.mark_validated(
                 size=result.file_bytes,
                 width=result.width,
@@ -753,6 +769,39 @@ class ApplicationOrchestrator:
         except OSError:
             logger.warning("event=rejected_image_keep_failed", exc_info=True)
 
+    def _prepare_upload_file(self) -> None:
+        """Replace the full-resolution capture by a cropped, size-limited copy for upload.
+
+        Falls back to the original on any problem: sending a big image beats losing the document.
+        """
+        assert self._capture_path is not None
+        cfg = self.config.upload_image
+        if not cfg.crop_to_document and not cfg.max_dimension:
+            return
+        original = self._capture_path
+        dst = self.temp_store.create_temp_path()
+        started = time.monotonic()
+        try:
+            prepared = prepare_upload_image(original, dst, self._upload_crop_roi, cfg)
+        except Exception:
+            logger.warning("event=upload_image_prepare_failed using=original", exc_info=True)
+            self.temp_store.cleanup(dst)
+            return
+        logger.info(
+            "event=upload_image_prepared source=%dx%d output=%dx%d cropped=%s bytes_before=%d bytes_after=%d "
+            "duration_ms=%d",
+            prepared.source_width,
+            prepared.source_height,
+            prepared.width,
+            prepared.height,
+            prepared.cropped,
+            original.stat().st_size,
+            prepared.file_bytes,
+            int((time.monotonic() - started) * 1000),
+        )
+        self.temp_store.cleanup(original)
+        self._capture_path = prepared.path
+
     async def _uploading_tick(self) -> None:
         if not self._claim_state_action():
             return
@@ -769,6 +818,7 @@ class ApplicationOrchestrator:
             self._transaction.image_size,
             (self._transaction.image_sha256 or "")[:16],
         )
+        await asyncio.to_thread(self._prepare_upload_file)
         request = UploadRequest(
             capture_id=self._transaction.capture_id,
             device_id=self.config.device_id,

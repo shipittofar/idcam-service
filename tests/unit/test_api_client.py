@@ -228,3 +228,28 @@ class TestUploadRetries:
         response = await _upload(config, transaction)
         assert not response.success
         assert route.call_count < 10  # the deadline, not max_attempts, ended the retries
+
+
+class TestPrewarm:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_prewarm_sends_head_and_never_raises(self, app_config):
+        route = respx.head("https://api.example.com").mock(return_value=httpx.Response(200))
+        client = ApiClient(app_config)
+        await client.start()
+        await client.prewarm()
+        await client.stop()
+        assert route.called
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_prewarm_swallows_connection_errors(self, app_config):
+        respx.head("https://api.example.com").mock(side_effect=httpx.ConnectError("down"))
+        client = ApiClient(app_config)
+        await client.start()
+        await client.prewarm()  # must not raise
+        await client.stop()
+
+    @pytest.mark.asyncio
+    async def test_prewarm_before_start_is_a_noop(self, app_config):
+        await ApiClient(app_config).prewarm()

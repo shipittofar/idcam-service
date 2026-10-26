@@ -231,6 +231,15 @@ class LedConfig(BaseModel):
     failure_flash_sec: float = Field(2.0, ge=0.0, le=30.0)
 
 
+class UploadImageConfig(BaseModel):
+    """What is actually sent: a cropped, size-limited copy of the validated capture."""
+
+    crop_to_document: bool = True
+    crop_margin: float = Field(0.10, ge=0.0, le=0.5)  # extra around the document box, per side
+    max_dimension: int = Field(2400, ge=0, le=12000)  # long side in px; 0 = keep native size
+    jpeg_quality: int = Field(85, ge=40, le=100)
+
+
 class AppConfig(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=128)
     temp_dir: Path = Path("/var/lib/idcam/tmp")
@@ -239,6 +248,7 @@ class AppConfig(BaseModel):
     camera: CameraConfig = CameraConfig()
     detection: DetectionConfig = DetectionConfig()
     quality: QualityConfig = QualityConfig()
+    upload_image: UploadImageConfig = UploadImageConfig()
     storage: StorageConfig = StorageConfig()
     state_timeouts: StateTimeoutsConfig = StateTimeoutsConfig()
     logging: LoggingConfig = LoggingConfig()
