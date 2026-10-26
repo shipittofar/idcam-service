@@ -29,6 +29,13 @@ pytest tests/unit
 IDCAM_MOCK_CAMERA=1 idcam --config config.example.yaml
 ```
 
+Run from a plain folder on the Pi instead of the systemd service (one command; it
+installs dependencies, builds `.venv`, copies settings from `/etc/idcam` if present):
+
+```bash
+git clone https://github.com/shipittofar/idcam-service.git && cd idcam-service && bash scripts/setup_local.sh --stop-service && ./run.sh
+```
+
 On a Raspberry Pi with the camera, run `sudo bash scripts/install.sh` and follow
 [Production installation](#production-installation-on-raspberry-pi).
 

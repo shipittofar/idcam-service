@@ -2,3 +2,8 @@ __pycache__/
 *.py[cod]
 
 tmp-test-capture.jpg
+.venv/
+data/
+config.yaml
+.env
+run.sh
