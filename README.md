@@ -17,6 +17,21 @@ Continuously monitors the capture area, detects documents, stabilizes, autofocus
 - systemd autostart with recovery
 - Mock camera mode for development/testing
 
+## Quick start
+
+Try it on any machine (Python 3.11+) with the mock camera. No hardware or server is needed:
+
+```bash
+git clone https://github.com/shipittofar/idcam-service.git
+cd idcam-service
+pip install -e ".[dev]"
+pytest tests/unit
+IDCAM_MOCK_CAMERA=1 idcam --config config.example.yaml
+```
+
+On a Raspberry Pi with the camera, run `sudo bash scripts/install.sh` and follow
+[Production installation](#production-installation-on-raspberry-pi).
+
 ## Requirements
 
 - Raspberry Pi 5
@@ -231,6 +246,7 @@ Hardware tests are skipped off-device. Run the full suite after installer change
 - [Architecture](docs/ARCHITECTURE.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Security](docs/SECURITY.md)
+- [Codebase audit report](ID_CAM_AUDIT_REPORT.md): architecture, upload contents, performance bottlenecks and a prioritised fix list
 
 ## License
 
