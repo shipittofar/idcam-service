@@ -74,6 +74,8 @@ class ApplicationOrchestrator:
     MAX_AUTO_RETRIES_WITH_DOCUMENT = 2
     # Consecutive empty-scene frames before a locked document counts as removed.
     DOCUMENT_LOSS_FRAMES = 3
+    # Times the page may seem to move right before the shutter before the capture is given up.
+    MAX_MOTION_RESTABILIZE = 3
 
     def __init__(self, config: AppConfig, *, use_mock_camera: bool = False) -> None:
         self.config = config
@@ -117,6 +119,7 @@ class ApplicationOrchestrator:
         self._awaiting_removal_log_count = 0
         self._consecutive_failures = 0
         self._presence_misses = 0
+        self._motion_retries = 0
         self._upload_crop_roi: tuple[int, int, int, int] | None = None
         self._background: set[asyncio.Task] = set()
         self._last_scene_empty = False
@@ -330,9 +333,13 @@ class ApplicationOrchestrator:
             h, w = int(frame.shape[0]), int(frame.shape[1])
             self._last_preview_size = (w, h)
 
-    async def _safe_preview(self):
+    async def _safe_preview(self, *, fresh: bool = False):
+        """Preview frame; ``fresh`` = first frame exposed after now (not one queued earlier)."""
+        capture = self.camera.capture_preview_array
+        if fresh and callable(getattr(self.camera, "capture_fresh_preview_array", None)):
+            capture = self.camera.capture_fresh_preview_array
         try:
-            return await asyncio.to_thread(self.camera.capture_preview_array)
+            return await asyncio.to_thread(capture)
         except CameraError as exc:
             logger.error("event=camera_preview_failed %s", exc)
             self._publish_debug(camera_error=str(exc))
@@ -341,7 +348,7 @@ class ApplicationOrchestrator:
 
     async def _check_motion_abort(self) -> bool:
         """Return False if locked document moved significantly (not AE noise)."""
-        frame = await self._safe_preview()
+        frame = await self._safe_preview(fresh=True)
         if frame is None:
             return False
         if not self.detector.lock.is_locked:
@@ -358,6 +365,13 @@ class ApplicationOrchestrator:
                 motion,
                 threshold,
             )
+            self._motion_retries += 1
+            if self._motion_retries <= self.MAX_MOTION_RESTABILIZE:
+                # Not a failure: wait for the page to settle again, then refocus and retry.
+                self.stability.reset()
+                self.stability.set_roi(self.detector.lock.roi)
+                self._transition(AppState.WAITING_FOR_STABILITY, reason="moved_before_capture")
+                return False
             await self._fail_transaction_and_wait("stability_timeout", "Document moved during capture")
             return False
         return True
@@ -461,6 +475,7 @@ class ApplicationOrchestrator:
         self._upload_started = False
         self._upload_result = ""
         self._presence_misses = 0
+        self._motion_retries = 0
         self._upload_crop_roi = None
         set_log_context(capture_id=txn.capture_id)
         logger.info("event=transaction_started capture_id=%s trigger=%s", txn.capture_id, trigger)
@@ -644,6 +659,9 @@ class ApplicationOrchestrator:
                 result.sharpness,
                 result.improvement_ratio,
             )
+            settled = await self._safe_preview(fresh=True)
+            if settled is not None:
+                await asyncio.to_thread(self.detector.rebaseline_motion, settled)
             self._transition(AppState.CAPTURING, reason="focus_verified")
         except AutofocusError as exc:
             logger.error("event=autofocus_failed %s", exc)

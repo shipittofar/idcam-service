@@ -330,3 +330,29 @@ class TestSceneEmpty:
     def test_page_in_view_is_not_empty(self):
         assert not self._detector_with(0.60).is_scene_empty(_desk_frame())
         assert not self._detector_with(0.40).is_scene_empty(_desk_frame())
+
+
+class TestBorderAndRebaseline:
+    def test_page_cut_off_by_the_top_edge_is_demoted(self):
+        inside = np.full((1080, 1920, 3), (70, 80, 75), dtype=np.uint8)
+        cv2.rectangle(inside, (600, 200), (1300, 900), (228, 226, 220), -1)
+        cut = np.full((1080, 1920, 3), (70, 80, 75), dtype=np.uint8)
+        cv2.rectangle(cut, (600, 0), (1300, 700), (228, 226, 220), -1)  # same page, pushed past the top edge
+
+        g_in = detect_document_geometry(inside)
+        g_cut = detect_document_geometry(cut)
+
+        assert g_in is not None
+        assert g_cut is None or g_cut.confidence < g_in.confidence * 0.8
+
+    def test_rebaseline_removes_defocus_induced_corner_shift(self):
+        cfg = DetectionConfig(min_geometry_confidence=0.25, detect_frames_required=1)
+        det = DocumentDetector(cfg)
+        frame = _document_frame(margin_x=90, margin_y=70)
+        det.detect(frame)
+        det.lock_document(frame)
+        det._prev_corners = tuple((x + 70, y + 40) for x, y in det._prev_corners)  # stale lock-time outline
+
+        det.rebaseline_motion(frame)
+
+        assert det.structural_motion_in_lock(frame) < 5.0

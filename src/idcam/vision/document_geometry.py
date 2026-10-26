@@ -344,6 +344,10 @@ def _score_geometry(
     touching = (bx <= edge) + (by <= edge) + (bx + bw >= w - edge) + (by + bh >= h - edge)
     if touching >= 2:
         confidence *= 0.4
+    elif touching == 1:
+        # Cut off by one frame edge: the page is not fully in view (logs: regions glued to the top
+        # of the empty desk locked with confidence 0.48-0.52 and then failed focus).
+        confidence *= 0.7
 
     tl, tr, br, bl = corners
     width_top = math.hypot(tr[0] - tl[0], tr[1] - tl[1])

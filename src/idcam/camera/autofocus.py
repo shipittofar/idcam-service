@@ -285,13 +285,15 @@ class AutofocusController:
             await asyncio.to_thread(setter, pos)
             await asyncio.sleep(settle)
             if callable(fresh_frame):
-                # First frame exposed after the settle time: never one queued before the lens arrived.
-                frame = await asyncio.to_thread(fresh_frame)
+                # Frames exposed after the settle time, never ones queued before the lens arrived.
+                # Best of two: a frame blurred by a moving hand reads far too low (logs: 6945 at
+                # 9.76 but 162 at 9.94 within one sweep) and must not decide the peak.
+                frames = [await asyncio.to_thread(fresh_frame) for _ in range(2)]
             else:
                 for _ in range(discard):
                     await asyncio.to_thread(camera.capture_preview_array)
-                frame = await asyncio.to_thread(camera.capture_preview_array)
-            pts[pos] = float(preview_sharpness(frame, roi=roi))
+                frames = [await asyncio.to_thread(camera.capture_preview_array)]
+            pts[pos] = max(float(preview_sharpness(f, roi=roi)) for f in frames)
             return pts[pos]
 
         async def climb(origin: float) -> None:

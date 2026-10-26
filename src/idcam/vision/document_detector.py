@@ -430,6 +430,20 @@ class DocumentDetector:
         geom = self._find_geometry(frame)
         return geom is None or geom.confidence < self.config.min_geometry_confidence * 0.8
 
+    def rebaseline_motion(self, frame: np.ndarray) -> None:
+        """Re-measure the locked outline on a frame taken after focusing.
+
+        The lock-time corners come from a defocused frame; sharp frames outline the same page a
+        few tens of pixels differently (up to ~80 px for a large page), which the pre-capture
+        movement check then misread as the document moving.
+        """
+        geom = self._find_geometry(frame)
+        if geom is not None and (self._prev_corners is None or self._same_document(self._prev_corners, geom.corners)):
+            self._prev_corners = geom.corners
+            if self.lock.is_locked:
+                self.lock.update(frame, geom)
+        self._lock_prev_norm = None
+
     @staticmethod
     def _same_document(prev: tuple[tuple[int, int], ...], new: tuple[tuple[int, int], ...]) -> bool:
         pa = np.array(prev, dtype=np.float32)

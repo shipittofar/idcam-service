@@ -360,3 +360,47 @@ class TestWaitsForRealDocument:
         assert orch.sm.state == AppState.IDLE
         assert not orch.detector.lock.is_locked
         assert orch._transaction is None
+
+
+class TestMotionBeforeShutter:
+    @staticmethod
+    def _capturing(app_config):
+        orch = _orch(app_config)
+        orch.sm.state = AppState.CAPTURING
+        orch._begin_transaction(trigger="auto")
+        orch.detector.lock_document(_document_frame(), allow_fallback=True)
+        orch._safe_preview = AsyncMock(return_value=_document_frame())
+        orch.detector.is_scene_empty = MagicMock(return_value=False)
+        orch.detector.structural_motion_in_lock = MagicMock(return_value=100.0)
+        return orch
+
+    @pytest.mark.asyncio
+    async def test_apparent_motion_restabilizes_instead_of_failing(self, app_config):
+        orch = self._capturing(app_config)
+
+        proceed = await orch._check_motion_abort()
+
+        assert proceed is False
+        assert orch.sm.state == AppState.WAITING_FOR_STABILITY
+        assert orch._consecutive_failures == 0
+        assert orch._transaction is not None
+        assert orch._motion_retries == 1
+
+    @pytest.mark.asyncio
+    async def test_persistent_motion_eventually_fails_the_capture(self, app_config):
+        orch = self._capturing(app_config)
+        orch._motion_retries = orch.MAX_MOTION_RESTABILIZE
+
+        proceed = await orch._check_motion_abort()
+
+        assert proceed is False
+        assert orch.sm.state == AppState.IDLE
+        assert orch._consecutive_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_still_page_goes_on_to_capture(self, app_config):
+        orch = self._capturing(app_config)
+        orch.detector.structural_motion_in_lock = MagicMock(return_value=1.0)
+
+        assert await orch._check_motion_abort() is True
+        assert orch.sm.state == AppState.CAPTURING
