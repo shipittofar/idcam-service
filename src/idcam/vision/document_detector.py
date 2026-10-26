@@ -454,7 +454,7 @@ class DocumentDetector:
         # focus changes; corner distance between different objects is not document movement
         # (observed motion=380 with a still document). Only compare corners of the same object.
         if geom and self._prev_corners is not None and self._same_document(self._prev_corners, geom.corners):
-            motion = corner_motion(self._prev_corners, geom.corners)
+            motion = corner_motion(self._prev_corners, geom.corners, robust=True)
             self._prev_corners = geom.corners
             self._last_frame_motion = motion
             return motion

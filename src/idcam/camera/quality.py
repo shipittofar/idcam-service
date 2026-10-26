@@ -13,7 +13,15 @@ from PIL import Image
 from idcam.config.schema import CameraConfig, QualityConfig
 from idcam.exceptions import ImageValidationError
 from idcam.logging.setup import get_logger
-from idcam.vision.sharpness import laplacian_variance, mean_brightness, scale_preview_roi_to_image, still_sharpness
+from idcam.vision.sharpness import (
+    clip_roi,
+    laplacian_variance,
+    mean_brightness,
+    preview_sharpness,
+    roi_rect,
+    scale_preview_roi_to_image,
+    still_sharpness,
+)
 
 logger = get_logger("camera.quality")
 
@@ -28,6 +36,8 @@ class ValidationResult:
     brightness: float
     sha256: str
     document_roi: tuple[int, int, int, int] | None = None
+    # Still Tenengrad on the document divided by the preview sharpness measured at focus time.
+    focus_ratio: float | None = None
 
 
 class ImageValidator:
@@ -44,6 +54,7 @@ class ImageValidator:
         document_roi: tuple[int, int, int, int] | None = None,
         preview_size: tuple[int, int] | None = None,
         scaler_crop: tuple[int, int, int, int] | None = None,
+        reference_sharpness: float | None = None,
     ) -> ValidationResult:
         if not path.exists():
             raise ImageValidationError(f"Image file not found: {path}")
@@ -116,25 +127,48 @@ class ImageValidator:
                 roi_for_frame = (rx // reduce, ry // reduce, max(1, rw // reduce), max(1, rh // reduce))
             document_sharpness = still_sharpness(frame, roi=roi_for_frame)
 
+        # Same metric and pixel scale as the autofocus check: the preview covers the sensor at
+        # 1/4 size, and so does this decode. A still that kept the focus-time sharpness is in
+        # focus even when the absolute Laplacian thresholds (tuned for another scale) say blurry.
+        focus_ratio: float | None = None
+        still_tenengrad = 0.0
+        if reference_sharpness is not None and reference_sharpness > 0:
+            if still_doc_roi is not None:
+                x, y, rw, rh = clip_roi(roi_for_frame, frame.shape)
+            else:
+                x, y, rw, rh = clip_roi(roi_rect(frame.shape, 0.7), frame.shape)
+            patch = np.ascontiguousarray(frame[y : y + rh, x : x + rw, ::-1])
+            still_tenengrad = preview_sharpness(patch, roi=(0, 0, patch.shape[1], patch.shape[0]))
+            focus_ratio = still_tenengrad / reference_sharpness
+
         logger.info(
             "event=pipeline_stage stage=image_validated "
             "sharpness_global=%.1f sharpness_document=%.1f min_global=%.1f min_document=%.1f "
-            "document_roi=%s",
+            "document_roi=%s still_tenengrad=%.1f focus_reference=%s focus_ratio=%s min_focus_ratio=%.2f",
             sharpness,
             document_sharpness,
             self.config.min_sharpness,
             self.config.min_document_sharpness,
             still_doc_roi,
+            still_tenengrad,
+            f"{reference_sharpness:.1f}" if reference_sharpness else None,
+            f"{focus_ratio:.2f}" if focus_ratio is not None else None,
+            self.config.still_focus_min_ratio,
         )
 
-        if sharpness < self.config.min_sharpness:
-            raise ImageValidationError(
-                f"Image too blurry (global): sharpness={sharpness:.1f} min={self.config.min_sharpness:.1f}"
-            )
-        if document_roi is not None and document_sharpness < self.config.min_document_sharpness:
+        absolute_ok = sharpness >= self.config.min_sharpness and (
+            document_roi is None or document_sharpness >= self.config.min_document_sharpness
+        )
+        relative_ok = focus_ratio is not None and focus_ratio >= self.config.still_focus_min_ratio
+        if not absolute_ok and not relative_ok:
+            detail = f" focus_ratio={focus_ratio:.2f} min={self.config.still_focus_min_ratio:.2f}" if focus_ratio is not None else ""
+            if sharpness < self.config.min_sharpness:
+                raise ImageValidationError(
+                    f"Image too blurry (global): sharpness={sharpness:.1f} min={self.config.min_sharpness:.1f}{detail}"
+                )
             raise ImageValidationError(
                 f"Document region too blurry: sharpness={document_sharpness:.1f} "
-                f"min={self.config.min_document_sharpness:.1f} roi={still_doc_roi}"
+                f"min={self.config.min_document_sharpness:.1f} roi={still_doc_roi}{detail}"
             )
         if brightness < self.config.min_brightness:
             raise ImageValidationError(f"Image too dark: brightness={brightness:.1f}")
@@ -153,6 +187,7 @@ class ImageValidator:
             brightness=brightness,
             sha256=sha256,
             document_roi=still_doc_roi,
+            focus_ratio=focus_ratio,
         )
         logger.info(
             "Image validated: %dx%d bytes=%d sharpness=%.1f doc_sharpness=%.1f sha256=%s path=%s",

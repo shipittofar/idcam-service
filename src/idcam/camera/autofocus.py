@@ -280,6 +280,7 @@ class AutofocusController:
 
         try:
             pts: dict[float, float] = {round(start, 3): await measure(start)}
+            # Coarse: walk downhill-to-uphill in `step` increments until sharpness stops rising.
             for direction in (1.0, -1.0):
                 pos = start
                 improved = False
@@ -295,22 +296,23 @@ class AutofocusController:
                 if improved:
                     break
 
+            # Fine: the sharpness peak at close range is narrower than the coarse step
+            # (a 0.1 dioptre error halved the metric in logs), so probe both sides at smaller steps.
             best = max(pts, key=lambda p: pts[p])
+            for fine in (step * 0.4, step * 0.16):
+                for cand in (best + fine, best - fine):
+                    cand = round(min(max(cand, lo), hi), 3)
+                    if cand in pts:
+                        continue
+                    pts[cand] = await measure(cand)
+                    if pts[cand] > pts[best] * 1.01:
+                        best = cand
+
+            # Park the lens on the winner and confirm it with a fresh reading: the last
+            # measured position is usually not the best one, and the lens needs time to move.
+            if round(list(pts)[-1], 3) != best:
+                pts[best] = await measure(best)
             final = best
-            left, right = round(best - step, 3), round(best + step, 3)
-            if left in pts and right in pts:
-                # Parabola through the three samples around the peak.
-                denom = pts[left] - 2.0 * pts[best] + pts[right]
-                if denom < 0:
-                    offset = 0.5 * step * (pts[left] - pts[right]) / denom
-                    final = round(min(max(best + max(-step / 2, min(step / 2, offset)), lo), hi), 3)
-            if final != best:
-                pts[final] = await measure(final)
-                if pts[final] < pts[best]:
-                    final = best
-                    await asyncio.to_thread(setter, final)
-            elif best != list(pts)[-1]:
-                await asyncio.to_thread(setter, best)
             logger.info(
                 "event=autofocus_refined start=%.2f final=%.2f sharpness_start=%.1f sharpness_final=%.1f samples=%d",
                 start,

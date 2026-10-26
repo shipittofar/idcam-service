@@ -141,6 +141,9 @@ class CameraManager:
         self._still_config: Any = None
         self._logged_preview_format = False
         self._preview_af_mode: str | None = None
+        # Lens position we last commanded manually. capture_metadata() lags the command, so the
+        # still must use this value, not a metadata read (logs: still at 8.38 after parking at 8.17).
+        self._held_lens: float | None = None
 
     @property
     def is_mock(self) -> bool:
@@ -238,7 +241,7 @@ class CameraManager:
                 return
 
             assert self._picam2 is not None
-            lens_position = self._read_lens_position()
+            lens_position = self._held_lens if self._held_lens is not None else self._read_lens_position()
             try:
                 self._picam2.stop()
                 self._picam2.configure(self._still_config)
@@ -369,14 +372,18 @@ class CameraManager:
             assert self._picam2 is not None
             # Do not call picam2.autofocus_cycle(): with AfState unadvertised it
             # often returns immediately, and a blocking wait holds the camera lock.
+            self._held_lens = None
+            # Mode first, trigger in the next request: sent together, libcamera sometimes
+            # rejects the trigger ("no AF algorithm or not Auto") while still in Continuous.
             self._set_controls_unlocked(
                 {
                     "AfMode": self._af_mode_auto(),
                     "AfSpeed": self._af_speed_fast(),
                     "AfRange": self._af_range_full(),
-                    "AfTrigger": self._af_trigger_start(),
                 }
             )
+            time.sleep(0.1)
+            self._set_controls_unlocked({"AfTrigger": self._af_trigger_start()})
             logger.info("event=autofocus_triggered method=af_controls AfMode=Auto AfTrigger=Start wait=lens_settle")
 
     def wait_for_lens_settle(self, timeout_sec: float) -> float | None:
@@ -434,6 +441,7 @@ class CameraManager:
             self._set_controls_unlocked(
                 {"AfMode": self._af_mode_manual(), "LensPosition": float(position)}
             )
+            self._held_lens = float(position)
 
     def pause_autofocus(self) -> None:
         """Lock the current lens position so Continuous AF does not hunt during still capture."""
@@ -448,6 +456,7 @@ class CameraManager:
                 lens = self._read_lens_position()
                 if lens is not None:
                     self._set_controls_unlocked({"AfMode": self._af_mode_manual(), "LensPosition": lens})
+                    self._held_lens = float(lens)
                     logger.info("event=autofocus_result method=hold_lens_position lens_position=%s", lens)
 
     def _af_enum(self, group: str, name: str, fallback: int) -> int:
@@ -515,6 +524,7 @@ class CameraManager:
             logger.info("event=autofocus_preview_skipped reason=AfMode_not_advertised")
             return
 
+        self._held_lens = None
         continuous = self._af_mode_continuous()
         max_mode = self._af_mode_max()
         if max_mode is not None and max_mode >= continuous:

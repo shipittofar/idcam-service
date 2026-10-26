@@ -712,6 +712,7 @@ class ApplicationOrchestrator:
                 document_roi=focus_roi,
                 preview_size=preview_size,
                 scaler_crop=scaler_crop,
+                reference_sharpness=self._transaction.sharpness_score or None,
             )
             self._transaction.mark_validated(
                 size=result.file_bytes,

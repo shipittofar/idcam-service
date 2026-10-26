@@ -294,3 +294,16 @@ class TestOutlineAlignment:
         frame = np.full((1080, 1920, 3), (70, 80, 75), dtype=np.uint8)
         noise = np.random.default_rng(0).normal(0, 4, frame.shape)
         assert detect_document_geometry((frame + noise).clip(0, 255).astype(np.uint8)) is None
+
+
+class TestRobustCornerMotion:
+    def test_one_jittering_corner_on_frame_border_is_not_motion(self):
+        prev = ((603, 393), (1293, 492), (1209, 1077), (501, 810))
+        curr = ((604, 394), (1292, 491), (1209, 1000), (502, 811))  # clipped corner moved 77 px
+        assert corner_motion(prev, curr) > 15.0
+        assert corner_motion(prev, curr, robust=True) < 3.0
+
+    def test_real_shift_of_the_whole_page_is_still_motion(self):
+        prev = ((600, 400), (1300, 400), (1300, 900), (600, 900))
+        curr = tuple((x + 60, y + 40) for x, y in prev)
+        assert corner_motion(prev, curr, robust=True) > 50.0

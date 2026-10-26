@@ -96,3 +96,18 @@ class TestLargeStillValidation:
         self._page(path, blur_sigma=8.0)
         with pytest.raises(ImageValidationError, match="blurry"):
             ImageValidator(QualityConfig(min_file_bytes=1000)).validate(path)
+
+    def test_blurry_by_absolute_threshold_passes_when_it_kept_the_focus_time_sharpness(self, tmp_path):
+        path = tmp_path / "big_soft.jpg"
+        self._page(path, blur_sigma=8.0)
+        validator = ImageValidator(QualityConfig(min_file_bytes=1000))
+        # focus-time reference far below what the still has -> ratio well above the minimum
+        result = validator.validate(path, reference_sharpness=1.0)
+        assert result.focus_ratio is not None and result.focus_ratio >= 0.35
+
+    def test_still_much_softer_than_at_focus_time_is_rejected_with_ratio_in_message(self, tmp_path):
+        path = tmp_path / "big_soft2.jpg"
+        self._page(path, blur_sigma=8.0)
+        validator = ImageValidator(QualityConfig(min_file_bytes=1000))
+        with pytest.raises(ImageValidationError, match=r"blurry.*focus_ratio="):
+            validator.validate(path, reference_sharpness=1e9)

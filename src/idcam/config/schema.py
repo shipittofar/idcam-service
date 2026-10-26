@@ -118,6 +118,9 @@ class QualityConfig(BaseModel):
     preview_focus_min_delta: float = Field(1.5, gt=0)
     min_sharpness: float = Field(80.0, gt=0)
     min_document_sharpness: float = Field(40.0, gt=0)
+    # Accept a still whose document Tenengrad (at 1/4 scale) is at least this fraction of the
+    # sharpness measured at autofocus time, even if the absolute Laplacian thresholds fail.
+    still_focus_min_ratio: float = Field(0.35, gt=0, le=5.0)
     min_file_bytes: int = Field(100_000, gt=0)
     max_file_bytes: int = Field(50_000_000, gt=0)
     min_brightness: float = Field(30.0, ge=0, le=255)

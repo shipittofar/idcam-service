@@ -98,13 +98,19 @@ def smooth_corners(
 def corner_motion(
     prev: tuple[tuple[int, int], ...],
     curr: tuple[tuple[int, int], ...],
+    robust: bool = False,
 ) -> float:
+    """Mean corner displacement in pixels; ``robust`` uses the median of the four instead.
+
+    A corner that sits on the frame border (page partly out of view) jitters by tens of pixels
+    between detections while the page itself is still; the median ignores that one outlier.
+    """
     if len(prev) != 4 or len(curr) != 4:
         return 0.0
-    dist = 0.0
-    for i in range(4):
-        dist += math.hypot(curr[i][0] - prev[i][0], curr[i][1] - prev[i][1])
-    return dist / 4.0
+    dists = sorted(math.hypot(curr[i][0] - prev[i][0], curr[i][1] - prev[i][1]) for i in range(4))
+    if robust:
+        return (dists[1] + dists[2]) / 2.0
+    return sum(dists) / 4.0
 
 
 def _prepare_gray(frame: np.ndarray) -> np.ndarray:
