@@ -1,0 +1,64 @@
+[Unit]
+Description=idCam Document Capture Service
+Documentation=file:///opt/idcam
+After=network-online.target systemd-udevd.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=idcam
+Group=idcam
+WorkingDirectory=/var/lib/idcam
+
+# PDAF: uncomment if autofocus issues occur with embedded data parsing
+# Environment=LIBCAMERA_NOTPARSED_EMBEDDED_DATA=1
+
+EnvironmentFile=-/etc/idcam/environment
+Environment=IDCAM_CONFIG=/etc/idcam/config.yaml
+Environment=IDCAM_ENV=production
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/opt/idcam/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+ExecStart=/opt/idcam/venv/bin/idcam
+
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+UMask=0027
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=idcam
+
+# /run/idcam is created at start and removed on stop. Do not mkdir it by hand.
+RuntimeDirectory=idcam
+RuntimeDirectoryMode=0755
+StateDirectory=idcam
+StateDirectoryMode=0750
+LogsDirectory=idcam
+LogsDirectoryMode=0750
+
+# Security hardening (camera device access must remain available)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/idcam /var/log/idcam /run/idcam
+
+[Install]
+WantedBy=multi-user.target

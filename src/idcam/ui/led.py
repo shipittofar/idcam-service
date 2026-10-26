@@ -1,0 +1,214 @@
+"""WS2812B (NeoPixel) status LED strip for Raspberry Pi 5.
+
+Optional and off by default. The strip is a status aid only: if the LED
+libraries are missing or the hardware fails, the indicator logs a warning
+and turns itself off. It never raises into the capture pipeline.
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
+
+from idcam.app.state_machine import AppState
+from idcam.logging.setup import get_logger
+
+if TYPE_CHECKING:
+    from idcam.config.schema import LedConfig
+
+logger = get_logger("led")
+
+Color = tuple[int, int, int]
+
+OFF: Color = (0, 0, 0)
+WHITE: Color = (255, 255, 255)
+YELLOW: Color = (255, 255, 0)
+BLUE: Color = (0, 0, 255)
+GREEN: Color = (0, 255, 0)
+RED: Color = (255, 0, 0)
+
+FRAME_INTERVAL_SEC = 0.05
+
+
+@dataclass(frozen=True)
+class LedPattern:
+    color: Color
+    mode: str = "solid"  # solid | blink | pulse
+    period_sec: float = 1.0
+
+    def color_at(self, t: float) -> Color:
+        if self.mode == "blink":
+            return self.color if (t % self.period_sec) < self.period_sec / 2 else OFF
+        if self.mode == "pulse":
+            level = 0.15 + 0.85 * (0.5 - 0.5 * math.cos(2 * math.pi * t / self.period_sec))
+            return tuple(int(c * level) for c in self.color)  # type: ignore[return-value]
+        return self.color
+
+
+STARTING = LedPattern(BLUE, "pulse", 2.0)
+READY = LedPattern(WHITE)
+# Detection through capture reuses the ready pattern itself, so the strip
+# stays the same steady white from IDLE through autofocus and the still
+# capture and the light on the document never changes mid-capture.
+DOCUMENT = READY
+PROCESSING = LedPattern(BLUE, "blink", 0.6)
+DONE = LedPattern(GREEN)
+RECOVERING = LedPattern(YELLOW, "blink", 1.0)
+FAULT = LedPattern(RED, "blink", 1.0)
+DARK = LedPattern(OFF)
+FAILURE_FLASH = LedPattern(RED)
+
+STATE_PATTERNS: dict[AppState, LedPattern] = {
+    AppState.BOOT: STARTING,
+    AppState.INITIALIZING: STARTING,
+    AppState.CAMERA_INITIALIZING: STARTING,
+    AppState.CAMERA_READY: STARTING,
+    AppState.IDLE: READY,
+    AppState.DOCUMENT_DETECTED: DOCUMENT,
+    AppState.WAITING_FOR_STABILITY: DOCUMENT,
+    AppState.FOCUSING: DOCUMENT,
+    AppState.FOCUS_VERIFICATION: DOCUMENT,
+    AppState.CAPTURING: DOCUMENT,
+    AppState.IMAGE_VALIDATION: PROCESSING,
+    AppState.UPLOADING: PROCESSING,
+    AppState.WAITING_FOR_SERVER: PROCESSING,
+    AppState.PROCESSING_RESPONSE: PROCESSING,
+    AppState.SUCCESS: DONE,
+    AppState.WAITING_FOR_REMOVAL: DONE,
+    AppState.RECOVERY: RECOVERING,
+    AppState.ERROR: FAULT,
+    AppState.SHUTDOWN: DARK,
+}
+
+
+class LedBackend(Protocol):
+    def show(self, color: Color) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class Pi5NeopixelBackend:
+    """Drives the strip through the Pi 5 RP1 PIO (same stack as ws2812_test.py)."""
+
+    def __init__(self, config: LedConfig) -> None:
+        import adafruit_pixelbuf
+        import board
+        from adafruit_raspberry_pi5_neopixel_write import neopixel_write
+
+        pin = getattr(board, f"D{config.gpio_pin}")
+
+        class _Pixelbuf(adafruit_pixelbuf.PixelBuf):
+            def _transmit(self, buf):
+                neopixel_write(pin, buf)
+
+        self._pixels = _Pixelbuf(
+            size=config.count,
+            auto_write=False,
+            byteorder=config.byteorder,
+            brightness=config.brightness,
+        )
+
+    def show(self, color: Color) -> None:
+        self._pixels.fill(color)
+        self._pixels.show()
+
+    def close(self) -> None:
+        self.show(OFF)
+
+
+class LedIndicator:
+    """Shows the application state on a WS2812B strip from a background thread."""
+
+    def __init__(self, config: LedConfig, backend: LedBackend | None = None) -> None:
+        self.config = config
+        self._backend = backend
+        self._lock = threading.Lock()
+        self._pattern = STATE_PATTERNS[AppState.BOOT]
+        self._pattern_since = time.monotonic()
+        self._flash: LedPattern | None = None
+        self._flash_until = 0.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_color: Color | None = None
+
+    @property
+    def active(self) -> bool:
+        return self._backend is not None and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def pattern(self) -> LedPattern:
+        with self._lock:
+            return self._pattern
+
+    def start(self) -> None:
+        if not self.config.enabled or self._thread is not None:
+            return
+        if self._backend is None:
+            try:
+                self._backend = Pi5NeopixelBackend(self.config)
+            except Exception as exc:
+                logger.warning("event=led_unavailable error=%s", exc)
+                return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="idcam-led", daemon=True)
+        self._thread.start()
+        logger.info(
+            "event=led_started gpio=%d count=%d brightness=%.2f",
+            self.config.gpio_pin,
+            self.config.count,
+            self.config.brightness,
+        )
+
+    def set_state(self, state: AppState) -> None:
+        pattern = STATE_PATTERNS.get(state, FAULT)
+        with self._lock:
+            if state == AppState.SHUTDOWN:
+                self._flash = None
+            if pattern is not self._pattern:
+                self._pattern = pattern
+                self._pattern_since = time.monotonic()
+
+    def flash_failure(self, seconds: float | None = None) -> None:
+        """Show solid red for a moment, then return to the current state's pattern."""
+        duration = self.config.failure_flash_sec if seconds is None else seconds
+        with self._lock:
+            self._flash = FAILURE_FLASH
+            self._flash_until = time.monotonic() + duration
+
+    def current_color(self, now: float | None = None) -> Color:
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            if self._flash is not None and now < self._flash_until:
+                return self._flash.color
+            self._flash = None
+            return self._pattern.color_at(now - self._pattern_since)
+
+    def stop(self) -> None:
+        self.set_state(AppState.SHUTDOWN)
+        thread = self._thread
+        if thread is not None:
+            self._stop.set()
+            thread.join(timeout=2.0)
+            self._thread = None
+        backend = self._backend
+        if backend is not None:
+            try:
+                backend.close()
+            except Exception as exc:
+                logger.warning("event=led_off_failed error=%s", exc)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            color = self.current_color()
+            if color != self._last_color:
+                try:
+                    self._backend.show(color)  # type: ignore[union-attr]
+                except Exception as exc:
+                    logger.warning("event=led_write_failed error=%s; LED indicator disabled", exc)
+                    self._backend = None
+                    return
+                self._last_color = color
+            self._stop.wait(FRAME_INTERVAL_SEC)

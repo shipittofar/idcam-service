@@ -1,0 +1,13 @@
+# Environment for the idcam systemd service.
+# Loaded via EnvironmentFile= in idcam.service.
+# Permissions: root:idcam 0640 — do not commit real secrets.
+#
+# Preferred place for the upload token (never store it in git):
+# IDCAM_AUTH_TOKEN=
+#
+# Optional overrides (otherwise set these in /etc/idcam/config.yaml):
+# IDCAM_DEVICE_ID=
+# IDCAM_SERVER_URL=
+#
+# Development only:
+# IDCAM_MOCK_CAMERA=0

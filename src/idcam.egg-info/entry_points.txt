@@ -1,0 +1,4 @@
+[console_scripts]
+idcam = idcam.app.main:main
+idcam-admin = idcam.app.admin:main
+idcam-long-run = idcam.app.long_run:main

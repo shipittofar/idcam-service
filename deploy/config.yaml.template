@@ -1,0 +1,118 @@
+# FIRST INSTALL — THIS FILE IS NOT PRODUCTION-READY.
+# The idcam service will refuse to start until you replace CHANGE_ME values.
+#
+# Required:
+#   device_id   unique identifier for this Pi
+#   server.url  real HTTPS API base URL (not example.com / unconfigured.invalid)
+#
+# Auth token: set IDCAM_AUTH_TOKEN in /etc/idcam/environment (preferred)
+# Do not put real secrets in git.
+
+device_id: "CHANGE_ME"
+
+temp_dir: /var/lib/idcam/tmp
+
+server:
+  url: https://unconfigured.invalid
+  path: /api/document
+  connect_timeout_sec: 10
+  read_timeout_sec: 60
+  total_timeout_sec: 90
+  verify_tls: true
+  max_upload_bytes: 50000000
+
+auth:
+  type: bearer
+  token: ""  # Prefer IDCAM_AUTH_TOKEN in /etc/idcam/environment
+
+storage:
+  min_free_mb: 1024
+  stale_temp_max_age_sec: 3600
+  capture_reserve_mb: 200
+
+state_timeouts:
+  document_detected: 5
+  waiting_for_stability: 15
+  focusing: 10
+  focus_verification: 5
+  capturing: 45
+  image_validation: 10
+  uploading: 60
+  waiting_for_server: 60
+  processing_response: 10
+
+camera:
+  preview_width: 1920
+  preview_height: 1080
+  capture_width: 9152
+  capture_height: 6944
+  jpeg_quality: 95
+  preview_fps: 5
+  af_max_retries: 3
+  af_timeout_sec: 10
+  af_verify_max_retries: 2
+  capture_timeout_sec: 45
+  recovery:
+    max_attempts: 3
+    delay_seconds: 2
+
+detection:
+  roi_center_fraction: 0.7
+  motion_threshold: 8.0
+  edge_density_threshold: 0.02
+  stable_frames_required: 8
+  removal_frames_required: 10
+  removal_motion_factor: 0.5
+  removal_edge_factor: 0.5
+  baseline_alpha: 0.05
+
+quality:
+  min_sharpness: 80.0
+  min_file_bytes: 100000
+  max_file_bytes: 50000000
+  min_brightness: 30.0
+  max_brightness: 225.0
+  min_width: 640
+  min_height: 480
+  require_expected_dimensions: false
+  dimension_tolerance: 64
+
+logging:
+  level: INFO
+  log_dir: /var/log/idcam
+  max_bytes: 10485760
+  backup_count: 5
+  json_format: true
+
+ui:
+  status_file: /run/idcam/status.json
+  admin_socket: /run/idcam/admin.sock
+  refresh_interval_sec: 0.5
+
+watchdog:
+  check_interval_sec: 1.0
+  state_timeout_sec: 300
+
+# Live Debug Viewer — leave disabled in production.
+# Enabling exposes the live preview over HTTP with no authentication.
+debug:
+  enabled: false
+  host: 0.0.0.0
+  port: 8088
+  fps: 5.0
+  jpeg_quality: 70
+  max_width: 1280
+  overlay: true
+
+# WS2812B status LED strip (Raspberry Pi 5) — off by default.
+# Needs the LED libraries: run the installer with --with-led.
+# White = ready and throughout detection / focusing / capturing,
+# blue blinking = validating and uploading, green = done (remove document),
+# red for 2 s = capture failed, yellow blinking = recovering, red blinking = error.
+led:
+  enabled: false
+  gpio_pin: 18          # BCM number; GPIO18 is physical pin 12
+  count: 30
+  brightness: 0.2       # 0.0 - 1.0
+  byteorder: GRB
+  failure_flash_sec: 2.0

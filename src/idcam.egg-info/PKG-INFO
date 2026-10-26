@@ -1,0 +1,127 @@
+Metadata-Version: 2.4
+Name: idcam
+Version: 1.0.0
+Summary: Production document capture for Raspberry Pi 5 + Arducam 64MP Hawkeye
+License: Proprietary
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic>=2.5
+Requires-Dist: pydantic-settings>=2.1
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: httpx>=0.27
+Requires-Dist: numpy>=1.26
+Requires-Dist: opencv-python-headless>=4.9
+Requires-Dist: Pillow>=10.2
+Provides-Extra: pi
+Requires-Dist: picamera2>=0.3.22; extra == "pi"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
+Requires-Dist: pytest-cov>=4.1; extra == "dev"
+Requires-Dist: respx>=0.21; extra == "dev"
+
+# idCam
+
+Production document capture for **Raspberry Pi 5** + **Arducam 64MP Hawkeye** autofocus camera.
+
+Continuously monitors the capture area, detects documents, stabilizes, autofocuses, captures, validates, and uploads to a remote server. Designed for 24/7 unattended operation.
+
+## Features
+
+- Explicit deterministic state machine (no callback spaghetti)
+- Single active capture transaction (no queue)
+- Arducam 64MP / libcamera / Picamera2 integration
+- Autofocus with sharpness verification
+- Document detection and stability gating
+- Atomic capture files with validation
+- HTTPS upload with idempotency key
+- Structured JSON logging with rotation
+- systemd autostart with recovery
+- Mock camera mode for development/testing
+
+## Requirements
+
+- Raspberry Pi 5
+- Arducam 64MP Hawkeye (CSI, CAM1 port on Pi 5)
+- Raspberry Pi OS Bookworm or Trixie (64-bit)
+- Arducam driver stack (see Installation)
+
+## Quick Start
+
+```bash
+# On the Pi (as root)
+sudo bash deploy/install.sh
+
+# Edit configuration
+sudo nano /etc/idcam/config.yaml
+
+# Set auth token securely
+sudo bash -c 'echo IDCAM_AUTH_TOKEN=your-token-here >> /etc/idcam/environment'
+
+# Start
+sudo systemctl start idcam
+sudo systemctl status idcam
+```
+
+## Development (off-device)
+
+```bash
+pip install -e ".[dev]"
+IDCAM_MOCK_CAMERA=1 idcam --config config.example.yaml
+```
+
+## Configuration
+
+See `config.example.yaml`. Key settings:
+
+| Setting | Description |
+|---------|-------------|
+| `device_id` | Unique device identifier |
+| `server.url` | HTTPS API base URL |
+| `server.path` | Upload endpoint path |
+| `auth.token` | Bearer token (prefer `IDCAM_AUTH_TOKEN` env) |
+| `camera.capture_width/height` | Full-res capture (default 9152×6944) |
+| `quality.min_sharpness` | Laplacian variance threshold |
+
+Environment overrides: `IDCAM_CONFIG`, `IDCAM_AUTH_TOKEN`, `IDCAM_DEVICE_ID`, `IDCAM_SERVER_URL`, `IDCAM_MOCK_CAMERA`.
+
+## User Status
+
+The application writes real-time status to `/run/idcam/status.json`:
+
+```json
+{
+  "state": "IDLE",
+  "message": "Ready — Place document",
+  "camera_healthy": true,
+  "network_healthy": true
+}
+```
+
+## Server API
+
+```
+POST /api/document
+Headers: Authorization, X-Device-ID, X-Capture-ID, Idempotency-Key
+Body: multipart/form-data, field "image" (JPEG)
+```
+
+See `docs/ARCHITECTURE.md` for full protocol and delivery semantics.
+
+## Testing
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+pytest tests/ -m hardware  # on Pi with camera
+```
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Security](docs/SECURITY.md)
+
+## License
+
+Proprietary
