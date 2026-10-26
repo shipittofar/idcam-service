@@ -192,6 +192,7 @@ class DocumentDetector:
         self._last_document_roi = self.lock.roi
         self._last_focus_roi = self.lock.focus_roi
         self._prev_corners = self.lock.corners
+        # No pixel baseline here: focusing changes sharpness, which the pixel metric reads as motion.
         self._lock_prev_norm = None
         self._detected_latched = True
         self._present_frames = self.config.detect_frames_required
@@ -422,6 +423,17 @@ class DocumentDetector:
                 return motion < self.config.motion_threshold * self.config.lose_motion_factor
         return geom is None or geom.confidence < self.config.min_geometry_confidence * 0.35
 
+    @staticmethod
+    def _same_document(prev: tuple[tuple[int, int], ...], new: tuple[tuple[int, int], ...]) -> bool:
+        pa = np.array(prev, dtype=np.float32)
+        pb = np.array(new, dtype=np.float32)
+        area_a = float(cv2.contourArea(pa))
+        area_b = float(cv2.contourArea(pb))
+        if area_a <= 0 or area_b <= 0 or not 0.7 <= area_b / area_a <= 1.43:
+            return False
+        shift = float(np.linalg.norm(pa.mean(axis=0) - pb.mean(axis=0)))
+        return shift < 0.25 * float(np.sqrt(area_a))
+
     def structural_motion_in_lock(self, frame: np.ndarray) -> float:
         if not self.lock.is_locked:
             return self._last_frame_motion
@@ -430,7 +442,10 @@ class DocumentDetector:
             min_area_fraction=self.config.geometry_min_area_fraction,
             max_area_fraction=self.config.geometry_max_area_fraction,
         )
-        if geom and self._prev_corners is not None:
+        # Re-detection can pick a different quadrilateral (e.g. whole frame vs the paper) after
+        # focus changes; corner distance between different objects is not document movement
+        # (observed motion=380 with a still document). Only compare corners of the same object.
+        if geom and self._prev_corners is not None and self._same_document(self._prev_corners, geom.corners):
             motion = corner_motion(self._prev_corners, geom.corners)
             self._prev_corners = geom.corners
             self._last_frame_motion = motion
