@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import signal
 import threading
 import time
@@ -670,8 +672,26 @@ class ApplicationOrchestrator:
             self._transition(AppState.UPLOADING)
         except ImageValidationError as exc:
             logger.error("event=image_validation_failed %s", exc)
+            self._keep_rejected_for_debug(self._capture_path)
             self.temp_store.cleanup(self._capture_path)
             await self._fail_transaction_and_wait("image_invalid", str(exc))
+
+    def _keep_rejected_for_debug(self, path: Path) -> None:
+        """Opt-in (IDCAM_KEEP_REJECTED=1): keep the last 5 rejected images to inspect focus.
+
+        Off by default: captured images may be identity documents and must not linger on disk.
+        """
+        if os.environ.get("IDCAM_KEEP_REJECTED", "").lower() not in ("1", "true"):
+            return
+        try:
+            dest_dir = self.config.temp_dir.parent / "rejected"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dest_dir / f"rejected-{int(time.time())}.jpg")
+            for old in sorted(dest_dir.glob("rejected-*.jpg"))[:-5]:
+                old.unlink(missing_ok=True)
+            logger.warning("event=rejected_image_kept dir=%s", dest_dir)
+        except OSError:
+            logger.warning("event=rejected_image_keep_failed", exc_info=True)
 
     async def _uploading_tick(self) -> None:
         if not self._claim_state_action():
