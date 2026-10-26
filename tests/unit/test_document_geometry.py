@@ -212,3 +212,28 @@ class TestDocumentLockPersistence:
         assert det.lock.is_locked
         assert abs(roi_after[0] - roi_before[0]) <= 20
         assert abs(roi_after[1] - roi_before[1]) <= 20
+
+
+class TestDownscaledDetection:
+    def test_1080p_frame_detected_at_reduced_resolution_and_mapped_back(self):
+        frame = np.full((1080, 1920, 3), (70, 80, 75), dtype=np.uint8)
+        cv2.rectangle(frame, (600, 200), (1300, 900), (228, 226, 220), -1)
+        for i in range(18):
+            cv2.putText(frame, "NAME SURNAME 123456", (650, 260 + i * 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (40, 40, 40), 1)
+
+        geom = detect_document_geometry(frame)
+
+        assert geom is not None
+        x, y, w, h = geom.bbox
+        # Coordinates are full-frame pixels even though segmentation ran on a 640 px image.
+        assert abs(x - 600) <= 25 and abs(y - 200) <= 25
+        assert abs(w - 700) <= 40 and abs(h - 700) <= 40
+        assert all(0 <= cx < 1920 and 0 <= cy < 1080 for cx, cy in geom.corners)
+
+    def test_region_glued_to_frame_borders_is_not_a_document(self):
+        frame = np.full((1080, 1920, 3), (70, 80, 75), dtype=np.uint8)
+        cv2.rectangle(frame, (230, 0), (1650, 1079), (228, 226, 220), -1)
+
+        geom = detect_document_geometry(frame)
+
+        assert geom is None or geom.confidence < 0.42

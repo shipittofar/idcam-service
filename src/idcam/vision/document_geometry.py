@@ -117,12 +117,21 @@ def _prepare_gray(frame: np.ndarray) -> np.ndarray:
     return clahe.apply(norm)
 
 
-def _binary_variants(gray: np.ndarray) -> list[tuple[str, np.ndarray]]:
-    """Multiple segmentation strategies for uneven lighting and weak edges."""
+def _odd(value: float, minimum: int) -> int:
+    n = max(minimum, int(round(value)))
+    return n if n % 2 else n + 1
+
+
+def _binary_variants(gray: np.ndarray, scale: float = 1.0) -> list[tuple[str, np.ndarray]]:
+    """Multiple segmentation strategies for uneven lighting and weak edges.
+
+    ``scale`` is the downscale factor applied to the frame (1.0 = untouched): structuring
+    elements and adaptive-threshold windows were tuned at full preview size, so they shrink with it.
+    """
     h, w = gray.shape
-    k5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    k9 = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
-    k15 = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    k5 = cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(5 * scale, 3),) * 2)
+    k9 = cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(9 * scale, 3),) * 2)
+    k15 = cv2.getStructuringElement(cv2.MORPH_RECT, (_odd(15 * scale, 5),) * 2)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     variants: list[tuple[str, np.ndarray]] = []
 
@@ -131,7 +140,7 @@ def _binary_variants(gray: np.ndarray) -> list[tuple[str, np.ndarray]]:
         return cv2.morphologyEx(closed, cv2.MORPH_OPEN, k5, iterations=1)
 
     for block in (21, 35, 51):
-        block = block | 1
+        block = _odd(block * scale, 7)
         for c in (7, 12):
             for inv, tag in ((False, "norm"), (True, "inv")):
                 flag = cv2.THRESH_BINARY_INV if inv else cv2.THRESH_BINARY
@@ -407,6 +416,34 @@ def _collect_from_mask(
     return results, reports
 
 
+_DETECT_MAX_DIM = 640
+
+
+def _rescale_geometry(geom: DocumentGeometry, factor: float, frame_shape: tuple[int, ...]) -> DocumentGeometry:
+    """Map a geometry found on a downscaled frame back to full-frame pixels."""
+    h, w = int(frame_shape[0]), int(frame_shape[1])
+    corners = tuple(
+        (min(max(int(round(x * factor)), 0), w - 1), min(max(int(round(y * factor)), 0), h - 1))
+        for x, y in geom.corners
+    )
+    bbox = corners_to_bbox(corners, frame_shape)
+    return DocumentGeometry(
+        corners=corners,  # type: ignore[arg-type]
+        bbox=bbox,
+        center=(bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2),
+        width=int(round(geom.width * factor)),
+        height=int(round(geom.height * factor)),
+        rotation_deg=geom.rotation_deg,
+        aspect_ratio=geom.aspect_ratio,
+        area_fraction=geom.area_fraction,
+        confidence=geom.confidence,
+        edge_strength=geom.edge_strength,
+        rectangularity=geom.rectangularity,
+        detection_method=geom.detection_method,
+        contrast_score=geom.contrast_score,
+    )
+
+
 def _detect_all(
     frame: np.ndarray,
     *,
@@ -421,15 +458,24 @@ def _detect_all(
     if h < 32 or w < 32:
         return None, [], "frame_too_small"
 
-    gray = _prepare_gray(frame)
+    # Segmenting 1080p costs ~0.65 s per call (19 mask variants); running it on every preview
+    # frame capped detection at ~1.4 fps on the Pi. Work at <= _DETECT_MAX_DIM and map back.
+    long_side = max(h, w)
+    ratio = min(1.0, _DETECT_MAX_DIM / long_side)
+    work = frame
+    if ratio < 1.0:
+        work = cv2.resize(frame, (max(1, round(w * ratio)), max(1, round(h * ratio))), interpolation=cv2.INTER_AREA)
+    scale = ratio  # kernels shrink only by the factor the frame was shrunk
+
+    gray = _prepare_gray(work)
     all_geoms: list[DocumentGeometry] = []
     all_reports: list[GeometryCandidateDiag] = []
 
-    for method, mask in _binary_variants(gray):
+    for method, mask in _binary_variants(gray, scale):
         geoms, reports = _collect_from_mask(
             mask,
             gray,
-            frame.shape,
+            work.shape,
             method,
             min_area_fraction=min_area_fraction,
             max_area_fraction=max_area_fraction,
@@ -451,6 +497,8 @@ def _detect_all(
         if all(_bbox_iou(geom.bbox, u.bbox) < 0.55 for u in unique):
             unique.append(geom)
     best = unique[0]
+    if ratio < 1.0:
+        best = _rescale_geometry(best, 1.0 / ratio, frame.shape)
     return best, all_reports, best.detection_method
 
 

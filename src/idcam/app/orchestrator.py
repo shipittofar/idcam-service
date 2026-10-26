@@ -227,6 +227,8 @@ class ApplicationOrchestrator:
         frame_interval = 1.0 / self.config.camera.preview_fps
 
         while not self._shutdown_event.is_set():
+            started = time.monotonic()
+            state_before = self.sm.state
             self._refresh_health()
             alert = self.watchdog.check(
                 self.sm,
@@ -234,15 +236,16 @@ class ApplicationOrchestrator:
             )
             if alert is not None:
                 await self._handle_watchdog(alert)
-                await asyncio.sleep(frame_interval)
-                continue
+            elif not await self._handle_state_timeout():
+                await self._dispatch_state_tick()
 
-            if await self._handle_state_timeout():
-                await asyncio.sleep(frame_interval)
-                continue
-
-            await self._dispatch_state_tick()
-            await asyncio.sleep(frame_interval)
+            # Fixed-rate loop: the old unconditional sleep(frame_interval) came on top of the
+            # tick's own work (~0.2 s + 0.5 s detection per step). Sleep only the remainder,
+            # and not at all right after a state change: the next state fetches its own frame.
+            if self.sm.state != state_before:
+                await asyncio.sleep(0)
+            else:
+                await asyncio.sleep(max(0.0, frame_interval - (time.monotonic() - started)))
 
     async def _handle_state_timeout(self) -> bool:
         if not self.sm.is_timed_out():
