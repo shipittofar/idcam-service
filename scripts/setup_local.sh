@@ -43,7 +43,7 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -e .
 
 echo "==> 4/5 Config (./config.yaml, ./data, ./.env)"
-mkdir -p data/tmp data/logs
+mkdir -p data/tmp data/logs data/run
 if [[ ! -f config.yaml ]]; then
     if sudo test -f /etc/idcam/config.yaml; then
         sudo cat /etc/idcam/config.yaml > config.yaml
@@ -54,7 +54,7 @@ if [[ ! -f config.yaml ]]; then
     fi
     chmod 600 config.yaml
 fi
-# Point the service-owned directories at this folder so no root-owned path is needed.
+# Point the service-owned directories (tmp, logs, /run status + admin socket) at this folder so no root-owned path is needed.
 sed -i -E "s|^(temp_dir:).*|\1 ${ROOT}/data/tmp|; s|^([[:space:]]*log_dir:).*|\1 ${ROOT}/data/logs|" config.yaml
 if [[ ! -f .env ]]; then
     if sudo test -f /etc/idcam/environment; then
