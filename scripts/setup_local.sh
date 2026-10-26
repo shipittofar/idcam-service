@@ -20,6 +20,31 @@ done
 [[ $EUID -ne 0 ]] || { echo "Run as your normal user (not root); sudo is used only where needed." >&2; exit 1; }
 command -v apt-get >/dev/null || { echo "This script targets Raspberry Pi OS / Debian (apt)." >&2; exit 1; }
 
+echo "==> 0/5 Camera stack guard"
+# Arducam 64MP on Pi 5 needs Arducam's libcamera build (it ships arducam_64mp.json).
+# The stock apt libcamera has no such file, so an upgrade silently kills the camera.
+# If the Arducam tuning file is present, pin the libcamera core packages.
+LIBCAMERA_PKGS=()
+for pkg in libcamera0.7 libcamera-ipa libcamera-dev; do
+    dpkg -s "$pkg" >/dev/null 2>&1 && LIBCAMERA_PKGS+=("$pkg")
+done
+if compgen -G "/usr/share/libcamera/ipa/rpi/*/arducam_64mp.json" >/dev/null; then
+    if ((${#LIBCAMERA_PKGS[@]})); then
+        sudo apt-mark hold "${LIBCAMERA_PKGS[@]}" >/dev/null
+        echo "   Arducam libcamera detected; held: ${LIBCAMERA_PKGS[*]}"
+    fi
+else
+    echo "   WARNING: arducam_64mp.json not found - the Arducam 64MP will not register."
+    ARDUCAM_DEBS=(~/libcamera0.7_*-2_arm64.deb ~/libcamera-ipa_*-2_arm64.deb ~/libcamera-dev_*-2_arm64.deb)
+    if [[ -e "${ARDUCAM_DEBS[0]}" && -e "${ARDUCAM_DEBS[1]}" && -e "${ARDUCAM_DEBS[2]}" ]]; then
+        echo "   Arducam .deb files found in ~. Review and install them, then re-run this script:"
+        echo "     sudo apt-get install --allow-downgrades ${ARDUCAM_DEBS[*]}"
+    else
+        echo "   Install Arducam's libcamera packages (install_pivariety_pkgs.sh), then re-run."
+    fi
+    echo "   (continuing: mock mode still works; real camera will fail until this is fixed)"
+fi
+
 echo "==> 1/5 System packages (sudo)"
 # --no-upgrade: install only what is missing. Never upgrade libcamera/rpicam that
 # already work with the camera (an upgrade can drop the arducam_64mp tuning file).
