@@ -21,13 +21,15 @@ done
 command -v apt-get >/dev/null || { echo "This script targets Raspberry Pi OS / Debian (apt)." >&2; exit 1; }
 
 echo "==> 1/5 System packages (sudo)"
+# --no-upgrade: install only what is missing. Never upgrade libcamera/rpicam that
+# already work with the camera (an upgrade can drop the arducam_64mp tuning file).
 sudo apt-get update -y
-sudo apt-get install -y python3 python3-pip python3-venv python3-dev \
+sudo apt-get install -y --no-upgrade python3 python3-pip python3-venv python3-dev \
     python3-libcamera python3-picamera2 v4l-utils
 # Optional extras: install when this OS has them, skip silently otherwise.
 for pkg in python3-kms++ rpicam-apps libcamera-apps; do
     if apt-cache show "$pkg" >/dev/null 2>&1; then
-        sudo apt-get install -y "$pkg" || echo "   (skipped optional $pkg)"
+        sudo apt-get install -y --no-upgrade "$pkg" || echo "   (skipped optional $pkg)"
     fi
 done
 
