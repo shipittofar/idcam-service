@@ -176,6 +176,19 @@ class TestIdleDoesNotStayWhenReady:
         assert orch._transaction is not None
         assert orch._transaction.trigger == "auto"
 
+    @pytest.mark.asyncio
+    async def test_repeated_failures_hold_until_document_removed(self, app_config):
+        orch = _orch(app_config)
+        orch.sm.state = AppState.IDLE
+        orch._awaiting_clear_scene = True
+        orch._consecutive_failures = orch.MAX_AUTO_RETRIES_WITH_DOCUMENT
+        orch.detector.update_baseline(_empty_frame())
+        orch._safe_preview = AsyncMock(return_value=_document_frame())
+        await orch._idle_tick()
+        assert orch.sm.state == AppState.IDLE
+        assert orch._awaiting_clear_scene is True
+        assert orch._transaction is None
+
 
 class TestAutoDetectStableFocusCapture:
     @pytest.mark.asyncio
