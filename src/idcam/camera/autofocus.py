@@ -226,10 +226,18 @@ class AutofocusController:
             )
 
             if accepted:
+                refined = await self._refine_focus(camera, roi, lens_after, after)
+                if refined is not None:
+                    lens_after, after = refined
+                    self.debug.lens_after = float(lens_after)
+                    self.debug.focus_after = after
+                    ratio = after / before if before > 1e-6 else ratio
+                    method = f"{method}+refine"
+                else:
+                    pause = getattr(camera, "pause_autofocus", None)
+                    if callable(pause):
+                        await asyncio.to_thread(pause)
                 logger.info("event=pipeline_stage stage=focus_verified method=%s sharpness=%.1f", method, after)
-                pause = getattr(camera, "pause_autofocus", None)
-                if callable(pause):
-                    await asyncio.to_thread(pause)
                 return self._result(
                     True, after, attempt, method, floor, before, after, ratio, roi, sensor, preview_size, lens_before, lens_after
                 )
@@ -240,6 +248,81 @@ class AutofocusController:
             f"Autofocus did not improve: before={before:.1f} after={after:.1f} "
             f"ratio={ratio:.2f} method={method} preview_roi={_fmt_roi(roi)}"
         )
+
+    async def _refine_focus(
+        self,
+        camera: FocusCapableCamera,
+        roi: tuple[int, int, int, int],
+        lens_start: Any,
+        start_sharpness: float,
+    ) -> tuple[float, float] | None:
+        """Hill-climb the lens position on the document ROI; leave the lens parked on the best one.
+
+        Returns (lens_position, sharpness), or None when refinement is unavailable or failed
+        (the caller then locks the lens as before).
+        """
+        setter = getattr(camera, "set_lens_position", None)
+        if not (self.config.af_refine and callable(setter)) or lens_start is None:
+            return None
+        range_fn = getattr(camera, "lens_position_range", None)
+        lo, hi = range_fn() if callable(range_fn) else (0.0, 32.0)
+        step = float(self.config.af_refine_step)
+        settle = float(self.config.af_refine_settle_sec)
+        max_points = int(self.config.af_refine_max_points)
+        start = min(max(float(lens_start), lo), hi)
+
+        async def measure(pos: float) -> float:
+            await asyncio.to_thread(setter, pos)
+            await asyncio.sleep(settle)
+            await asyncio.to_thread(camera.capture_preview_array)  # drop a frame queued before the move
+            frame = await asyncio.to_thread(camera.capture_preview_array)
+            return float(preview_sharpness(frame, roi=roi))
+
+        try:
+            pts: dict[float, float] = {round(start, 3): await measure(start)}
+            for direction in (1.0, -1.0):
+                pos = start
+                improved = False
+                while len(pts) < max_points:
+                    nxt = round(min(max(pos + direction * step, lo), hi), 3)
+                    if nxt in pts:
+                        break
+                    pts[nxt] = await measure(nxt)
+                    if pts[nxt] <= pts[round(pos, 3)] * 1.02:
+                        break
+                    improved = True
+                    pos = nxt
+                if improved:
+                    break
+
+            best = max(pts, key=lambda p: pts[p])
+            final = best
+            left, right = round(best - step, 3), round(best + step, 3)
+            if left in pts and right in pts:
+                # Parabola through the three samples around the peak.
+                denom = pts[left] - 2.0 * pts[best] + pts[right]
+                if denom < 0:
+                    offset = 0.5 * step * (pts[left] - pts[right]) / denom
+                    final = round(min(max(best + max(-step / 2, min(step / 2, offset)), lo), hi), 3)
+            if final != best:
+                pts[final] = await measure(final)
+                if pts[final] < pts[best]:
+                    final = best
+                    await asyncio.to_thread(setter, final)
+            elif best != list(pts)[-1]:
+                await asyncio.to_thread(setter, best)
+            logger.info(
+                "event=autofocus_refined start=%.2f final=%.2f sharpness_start=%.1f sharpness_final=%.1f samples=%d",
+                start,
+                final,
+                start_sharpness,
+                pts[final],
+                len(pts),
+            )
+            return float(final), float(pts[final])
+        except Exception:
+            logger.warning("event=autofocus_refine_failed", exc_info=True)
+            return None
 
     async def verify_focus(
         self,

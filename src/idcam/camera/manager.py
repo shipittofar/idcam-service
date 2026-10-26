@@ -416,6 +416,25 @@ class CameraManager:
         self.wait_for_lens_settle(min(float(self.config.af_timeout_sec), 3.0))
         return True
 
+    def lens_position_range(self) -> tuple[float, float]:
+        """Advertised LensPosition range in dioptres (0 = infinity)."""
+        if self._use_mock or self._picam2 is None:
+            return (0.0, 10.0)
+        info = self._picam2.camera_controls.get("LensPosition")
+        try:
+            return (float(info[0]), float(info[1]))
+        except (TypeError, IndexError, ValueError):
+            return (0.0, 10.0)
+
+    def set_lens_position(self, position: float) -> None:
+        """Drive the lens manually (AfMode=Manual), used by focus refinement."""
+        with self._lock:
+            if self._use_mock:
+                return
+            self._set_controls_unlocked(
+                {"AfMode": self._af_mode_manual(), "LensPosition": float(position)}
+            )
+
     def pause_autofocus(self) -> None:
         """Lock the current lens position so Continuous AF does not hunt during still capture."""
         with self._lock:

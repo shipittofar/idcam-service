@@ -268,3 +268,54 @@ class TestPreviewFocusAcceptance:
         assert result.success is True
         assert result.sharpness == 28.0
 
+
+
+class _LensCamera(FakeCamera):
+    """Preview sharpness peaks at lens position ``peak`` (dioptres)."""
+
+    def __init__(self, *, start: float, peak: float) -> None:
+        super().__init__(metadata={"AfState": 2, "LensPosition": start})
+        self.lens = start
+        self.peak = peak
+        self.lens_calls: list[float] = []
+
+    def set_lens_position(self, position: float) -> None:
+        self.lens = float(position)
+        self.lens_calls.append(self.lens)
+
+    def lens_position_range(self) -> tuple[float, float]:
+        return (0.0, 32.0)
+
+    def capture_preview_array(self) -> np.ndarray:
+        import cv2
+
+        sigma = 0.3 + 2.0 * abs(self.lens - self.peak)
+        return cv2.GaussianBlur(_sharp_frame(), (0, 0), sigma)
+
+
+class TestFocusRefinement:
+    @pytest.mark.asyncio
+    async def test_hill_climb_finds_sharper_lens_position_outside_af_result(self):
+        camera = _LensCamera(start=10.0, peak=8.2)
+        cfg = CameraConfig(af_timeout_sec=1.0, af_max_retries=1, af_refine_settle_sec=0.05)
+        ctl = AutofocusController(cfg)
+        ctl.probe_capabilities(camera)
+
+        result = await ctl.run_autofocus(camera, sharpness_threshold=1.0)
+
+        assert result.success is True
+        assert "refine" in result.method
+        assert abs(camera.lens - 8.2) <= 0.5
+        assert abs(result.lens_after - 8.2) <= 0.5
+
+    @pytest.mark.asyncio
+    async def test_refinement_can_be_disabled(self):
+        camera = _LensCamera(start=10.0, peak=8.2)
+        cfg = CameraConfig(af_timeout_sec=1.0, af_max_retries=1, af_refine=False)
+        ctl = AutofocusController(cfg)
+        ctl.probe_capabilities(camera)
+
+        result = await ctl.run_autofocus(camera, sharpness_threshold=1.0)
+
+        assert camera.lens_calls == []
+        assert "refine" not in result.method

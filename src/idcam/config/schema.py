@@ -67,6 +67,12 @@ class CameraConfig(BaseModel):
     af_max_retries: int = Field(1, ge=1, le=10)
     af_timeout_sec: float = Field(6.0, gt=0, le=120)
     af_verify_max_retries: int = Field(2, ge=1, le=5)
+    # After the hardware AF cycle, hill-climb the lens position (dioptres, 0..32) on the document
+    # ROI: the AF algorithm's own range/stop point is not always the sharpest for a close page.
+    af_refine: bool = True
+    af_refine_step: float = Field(0.5, gt=0.05, le=3.0)
+    af_refine_max_points: int = Field(7, ge=3, le=15)
+    af_refine_settle_sec: float = Field(0.25, ge=0.05, le=2.0)
     capture_timeout_sec: float = Field(45.0, gt=0, le=300)
     recovery: CameraRecoveryConfig = CameraRecoveryConfig()
 
