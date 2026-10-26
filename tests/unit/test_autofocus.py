@@ -82,15 +82,15 @@ class FakeCamera:
 
 class TestAutofocusController:
     @pytest.mark.asyncio
-    async def test_sharp_preview_skips_hardware_af(self):
-        """Do not move the lens when preview is already acceptably sharp."""
+    async def test_sharp_preview_still_runs_hardware_af(self):
+        """AF always runs once: a frame compared with itself proves nothing about the lens."""
         camera = FakeCamera()
         ctl = AutofocusController(CameraConfig(af_timeout_sec=1.0, af_max_retries=1))
         ctl.probe_capabilities(camera)
         result = await ctl.run_autofocus(camera, sharpness_threshold=1.0)
         assert result.success is True
-        assert camera.cycle_calls == 0
-        assert result.method == "already_sharp"
+        assert camera.cycle_calls >= 1
+        assert result.method != "already_sharp"
         assert result.roi[2] > 0
 
     @pytest.mark.asyncio

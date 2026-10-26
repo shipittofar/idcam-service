@@ -174,26 +174,17 @@ class AutofocusController:
             lens_before,
         )
 
-        if accept_preview_focus(
-            before=max(before * 0.9, 1.0),
-            after=before,
-            absolute_floor=floor,
-            min_ratio=min_ratio,
-            min_delta=min_delta,
-        ):
-            self.debug.method = "already_sharp"
-            self.debug.focus_after = before
-            logger.info("event=pipeline_stage stage=focus_verified method=already_sharp sharpness=%.1f", before)
-            return self._result(
-                True, before, 0, "already_sharp", floor, before, before, 1.0, roi, sensor, preview_size, lens_before, lens_before
-            )
-
+        # No "already sharp" shortcut: comparing a frame with itself always passes, so AF
+        # never ran and the lens stayed wherever Continuous AF last drifted (it moved
+        # between this check and the still). Always run a one-shot AF on the document
+        # ROI, then lock the lens (pause_autofocus below) before the still capture.
         after = before
         lens_after = lens_before
         method = "none"
         ratio = 0.0
 
-        for attempt in range(1, self.config.af_max_retries + 1):
+        # At least two passes: the first can land worse than the drifting Continuous AF.
+        for attempt in range(1, max(2, self.config.af_max_retries) + 1):
             self.debug.running = True
             self.debug.attempt = attempt
             method, _ = await self._run_hardware_af(camera, attempt)
