@@ -307,3 +307,26 @@ class TestRobustCornerMotion:
         prev = ((600, 400), (1300, 400), (1300, 900), (600, 900))
         curr = tuple((x + 60, y + 40) for x, y in prev)
         assert corner_motion(prev, curr, robust=True) > 50.0
+
+
+class TestSceneEmpty:
+    @staticmethod
+    def _detector_with(confidence):
+        from types import SimpleNamespace
+
+        det = DocumentDetector(DetectionConfig())
+        geom = None if confidence is None else SimpleNamespace(confidence=confidence, bbox=(0, 0, 10, 10),
+                                                              corners=((0, 0), (10, 0), (10, 10), (0, 10)),
+                                                              edge_strength=10.0)
+        det._find_geometry = lambda frame: geom
+        return det
+
+    def test_weak_desk_candidate_counts_as_empty(self):
+        """Empty desks produce outlines with confidence ~0.2; the removal wait must still end."""
+        assert self._detector_with(0.22).is_scene_empty(_desk_frame())
+        assert self._detector_with(0.30).is_scene_empty(_desk_frame())
+        assert self._detector_with(None).is_scene_empty(_desk_frame())
+
+    def test_page_in_view_is_not_empty(self):
+        assert not self._detector_with(0.60).is_scene_empty(_desk_frame())
+        assert not self._detector_with(0.40).is_scene_empty(_desk_frame())

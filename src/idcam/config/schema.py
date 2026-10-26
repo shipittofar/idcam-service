@@ -78,7 +78,14 @@ class CameraConfig(BaseModel):
     af_refine: bool = True
     af_refine_step: float = Field(0.5, gt=0.05, le=3.0)
     af_refine_max_points: int = Field(7, ge=3, le=15)
-    af_refine_settle_sec: float = Field(0.25, ge=0.05, le=2.0)
+    af_refine_settle_sec: float = Field(0.3, ge=0.05, le=2.0)
+    # Frames to throw away after each lens move: the capture queue holds frames from before it.
+    af_refine_discard_frames: int = Field(5, ge=0, le=12)
+    # When the sharpness curve has no clear peak, scan this lens range (dioptres, 0 = infinity).
+    af_wide_sweep: bool = True
+    af_wide_min: float = Field(4.0, ge=0, le=32)
+    af_wide_max: float = Field(16.0, ge=0, le=32)
+    af_wide_step: float = Field(1.0, gt=0.1, le=4.0)
     capture_timeout_sec: float = Field(45.0, gt=0, le=300)
     recovery: CameraRecoveryConfig = CameraRecoveryConfig()
 
@@ -118,9 +125,6 @@ class QualityConfig(BaseModel):
     preview_focus_min_delta: float = Field(1.5, gt=0)
     min_sharpness: float = Field(80.0, gt=0)
     min_document_sharpness: float = Field(40.0, gt=0)
-    # Accept a still whose document Tenengrad (at 1/4 scale) is at least this fraction of the
-    # sharpness measured at autofocus time, even if the absolute Laplacian thresholds fail.
-    still_focus_min_ratio: float = Field(0.35, gt=0, le=5.0)
     min_file_bytes: int = Field(100_000, gt=0)
     max_file_bytes: int = Field(50_000_000, gt=0)
     min_brightness: float = Field(30.0, ge=0, le=255)

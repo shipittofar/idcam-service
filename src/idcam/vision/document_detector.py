@@ -420,16 +420,15 @@ class DocumentDetector:
         return self._detected_latched or self.lock.is_locked
 
     def is_scene_empty(self, frame: np.ndarray) -> bool:
+        """True when no document is in view.
+
+        An empty desk still yields weak candidate outlines (confidence ~0.2 in logs), so "empty"
+        must mean "below the presence threshold", not "no candidate at all": the old rule
+        (empty only below 0.35x the detection threshold) never fired and the removal wait hung.
+        A small margin under the detection threshold keeps a present page from flickering to empty.
+        """
         geom = self._find_geometry(frame)
-        if geom and geom.confidence >= self.config.min_geometry_confidence * 0.55:
-            return False
-        if self.lock.is_locked and self._baseline_norm is not None:
-            gray = self._patch_gray(frame, self.lock.roi)
-            norm = normalize_gray(gray)
-            if self._baseline_norm.shape == norm.shape:
-                motion = structural_motion(self._baseline_norm, norm)
-                return motion < self.config.motion_threshold * self.config.lose_motion_factor
-        return geom is None or geom.confidence < self.config.min_geometry_confidence * 0.35
+        return geom is None or geom.confidence < self.config.min_geometry_confidence * 0.8
 
     @staticmethod
     def _same_document(prev: tuple[tuple[int, int], ...], new: tuple[tuple[int, int], ...]) -> bool:

@@ -127,9 +127,10 @@ class ImageValidator:
                 roi_for_frame = (rx // reduce, ry // reduce, max(1, rw // reduce), max(1, rh // reduce))
             document_sharpness = still_sharpness(frame, roi=roi_for_frame)
 
-        # Same metric and pixel scale as the autofocus check: the preview covers the sensor at
-        # 1/4 size, and so does this decode. A still that kept the focus-time sharpness is in
-        # focus even when the absolute Laplacian thresholds (tuned for another scale) say blurry.
+        # Diagnostic only: same metric and pixel scale as the autofocus check (the preview covers
+        # the sensor at 1/4 size, and so does this decode). A ratio near 1 with a failing absolute
+        # sharpness means focus converged on a soft peak, not that the thresholds are wrong; it
+        # must never turn a blurry image into an upload.
         focus_ratio: float | None = None
         still_tenengrad = 0.0
         if reference_sharpness is not None and reference_sharpness > 0:
@@ -144,7 +145,7 @@ class ImageValidator:
         logger.info(
             "event=pipeline_stage stage=image_validated "
             "sharpness_global=%.1f sharpness_document=%.1f min_global=%.1f min_document=%.1f "
-            "document_roi=%s still_tenengrad=%.1f focus_reference=%s focus_ratio=%s min_focus_ratio=%.2f",
+            "document_roi=%s still_tenengrad=%.1f focus_reference=%s focus_ratio=%s",
             sharpness,
             document_sharpness,
             self.config.min_sharpness,
@@ -153,22 +154,16 @@ class ImageValidator:
             still_tenengrad,
             f"{reference_sharpness:.1f}" if reference_sharpness else None,
             f"{focus_ratio:.2f}" if focus_ratio is not None else None,
-            self.config.still_focus_min_ratio,
         )
 
-        absolute_ok = sharpness >= self.config.min_sharpness and (
-            document_roi is None or document_sharpness >= self.config.min_document_sharpness
-        )
-        relative_ok = focus_ratio is not None and focus_ratio >= self.config.still_focus_min_ratio
-        if not absolute_ok and not relative_ok:
-            detail = f" focus_ratio={focus_ratio:.2f} min={self.config.still_focus_min_ratio:.2f}" if focus_ratio is not None else ""
-            if sharpness < self.config.min_sharpness:
-                raise ImageValidationError(
-                    f"Image too blurry (global): sharpness={sharpness:.1f} min={self.config.min_sharpness:.1f}{detail}"
-                )
+        if sharpness < self.config.min_sharpness:
+            raise ImageValidationError(
+                f"Image too blurry (global): sharpness={sharpness:.1f} min={self.config.min_sharpness:.1f}"
+            )
+        if document_roi is not None and document_sharpness < self.config.min_document_sharpness:
             raise ImageValidationError(
                 f"Document region too blurry: sharpness={document_sharpness:.1f} "
-                f"min={self.config.min_document_sharpness:.1f} roi={still_doc_roi}{detail}"
+                f"min={self.config.min_document_sharpness:.1f} roi={still_doc_roi}"
             )
         if brightness < self.config.min_brightness:
             raise ImageValidationError(f"Image too dark: brightness={brightness:.1f}")

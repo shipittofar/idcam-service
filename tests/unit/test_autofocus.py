@@ -319,3 +319,55 @@ class TestFocusRefinement:
 
         assert camera.lens_calls == []
         assert "refine" not in result.method
+
+
+class _NarrowPeakCamera(_LensCamera):
+    """Sharp only within ~0.5 dioptre of the peak; flat (fully blurred) elsewhere."""
+
+    def capture_preview_array(self) -> np.ndarray:
+        import cv2
+
+        sigma = min(7.0, 0.3 + 12.0 * abs(self.lens - self.peak))
+        return cv2.GaussianBlur(_sharp_frame(), (0, 0), sigma)
+
+
+class TestWideSweep:
+    @pytest.mark.asyncio
+    async def test_plateau_at_af_result_triggers_wide_sweep_that_finds_the_real_peak(self):
+        camera = _NarrowPeakCamera(start=8.0, peak=13.6)
+        cfg = CameraConfig(af_timeout_sec=1.0, af_max_retries=1, af_refine_settle_sec=0.05)
+        ctl = AutofocusController(cfg)
+        ctl.probe_capabilities(camera)
+
+        result = await ctl.run_autofocus(camera, sharpness_threshold=1.0)
+
+        assert "refine" in result.method
+        assert abs(camera.lens - 13.6) <= 0.6
+
+    @pytest.mark.asyncio
+    async def test_wide_sweep_can_be_disabled(self):
+        camera = _NarrowPeakCamera(start=8.0, peak=13.6)
+        cfg = CameraConfig(af_timeout_sec=1.0, af_max_retries=1, af_refine_settle_sec=0.05, af_wide_sweep=False)
+        ctl = AutofocusController(cfg)
+        ctl.probe_capabilities(camera)
+
+        await ctl.run_autofocus(camera, sharpness_threshold=1.0)
+
+        assert abs(camera.lens - 13.6) > 1.0  # stayed on the plateau near the AF result
+
+
+class _FlatCamera(_LensCamera):
+    def capture_preview_array(self) -> np.ndarray:
+        return _sharp_frame()  # same sharpness at every lens position: nothing to focus on
+
+
+class TestNoFocusPeak:
+    @pytest.mark.asyncio
+    async def test_flat_sharpness_curve_fails_focus_instead_of_capturing_blind(self):
+        camera = _FlatCamera(start=8.0, peak=0.0)
+        cfg = CameraConfig(af_timeout_sec=1.0, af_max_retries=1, af_refine_settle_sec=0.05)
+        ctl = AutofocusController(cfg)
+        ctl.probe_capabilities(camera)
+
+        with pytest.raises(AutofocusError, match="No focus peak"):
+            await ctl.run_autofocus(camera, sharpness_threshold=1.0)

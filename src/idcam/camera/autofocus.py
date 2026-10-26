@@ -256,10 +256,12 @@ class AutofocusController:
         lens_start: Any,
         start_sharpness: float,
     ) -> tuple[float, float] | None:
-        """Hill-climb the lens position on the document ROI; leave the lens parked on the best one.
+        """Find the lens position with the sharpest document ROI and park the lens there.
 
-        Returns (lens_position, sharpness), or None when refinement is unavailable or failed
-        (the caller then locks the lens as before).
+        Hill-climb from the AF result (coarse, then fine steps). If the sharpness curve has no
+        clear peak the AF stopped on a plateau, so scan a wide lens range and climb again from
+        the best point. Returns (lens_position, sharpness), or None when refinement is
+        unavailable or failed (the caller then locks the lens as before).
         """
         setter = getattr(camera, "set_lens_position", None)
         if not (self.config.af_refine and callable(setter)) or lens_start is None:
@@ -268,60 +270,102 @@ class AutofocusController:
         lo, hi = range_fn() if callable(range_fn) else (0.0, 32.0)
         step = float(self.config.af_refine_step)
         settle = float(self.config.af_refine_settle_sec)
+        discard = int(self.config.af_refine_discard_frames)
         max_points = int(self.config.af_refine_max_points)
         start = min(max(float(lens_start), lo), hi)
+        pts: dict[float, float] = {}
+
+        def clamp(pos: float) -> float:
+            return round(min(max(pos, lo), hi), 3)
 
         async def measure(pos: float) -> float:
+            pos = clamp(pos)
             await asyncio.to_thread(setter, pos)
             await asyncio.sleep(settle)
-            await asyncio.to_thread(camera.capture_preview_array)  # drop a frame queued before the move
+            # Frames queued before the lens arrived would be measured as this position.
+            for _ in range(discard):
+                await asyncio.to_thread(camera.capture_preview_array)
             frame = await asyncio.to_thread(camera.capture_preview_array)
-            return float(preview_sharpness(frame, roi=roi))
+            pts[pos] = float(preview_sharpness(frame, roi=roi))
+            return pts[pos]
 
-        try:
-            pts: dict[float, float] = {round(start, 3): await measure(start)}
-            # Coarse: walk downhill-to-uphill in `step` increments until sharpness stops rising.
+        async def climb(origin: float) -> None:
+            """Coarse hill-climb from ``origin`` in `step` increments, then fine probes."""
+            origin = clamp(origin)
+            if origin not in pts:
+                await measure(origin)
+            budget = len(pts) + max_points
             for direction in (1.0, -1.0):
-                pos = start
+                pos = origin
                 improved = False
-                while len(pts) < max_points:
-                    nxt = round(min(max(pos + direction * step, lo), hi), 3)
+                while len(pts) < budget:
+                    nxt = clamp(pos + direction * step)
                     if nxt in pts:
                         break
-                    pts[nxt] = await measure(nxt)
-                    if pts[nxt] <= pts[round(pos, 3)] * 1.02:
+                    await measure(nxt)
+                    if pts[nxt] <= pts[pos] * 1.02:
                         break
                     improved = True
                     pos = nxt
                 if improved:
                     break
-
-            # Fine: the sharpness peak at close range is narrower than the coarse step
-            # (a 0.1 dioptre error halved the metric in logs), so probe both sides at smaller steps.
+            # The peak at close range is narrower than the coarse step (0.12 dioptre changed the
+            # metric 2.4x in logs), so probe both sides at smaller steps.
             best = max(pts, key=lambda p: pts[p])
             for fine in (step * 0.4, step * 0.16):
-                for cand in (best + fine, best - fine):
-                    cand = round(min(max(cand, lo), hi), 3)
+                for cand in (clamp(best + fine), clamp(best - fine)):
                     if cand in pts:
                         continue
-                    pts[cand] = await measure(cand)
+                    await measure(cand)
                     if pts[cand] > pts[best] * 1.01:
                         best = cand
 
-            # Park the lens on the winner and confirm it with a fresh reading: the last
-            # measured position is usually not the best one, and the lens needs time to move.
-            if round(list(pts)[-1], 3) != best:
-                pts[best] = await measure(best)
-            final = best
+        def prominent() -> bool:
+            """A real focus peak is clearly above the rest of the sampled curve."""
+            values = sorted(pts.values())
+            return len(values) < 3 or values[-1] >= 1.3 * values[0]
+
+        try:
+            await climb(start)
+            if self.config.af_wide_sweep and not prominent():
+                wide = float(self.config.af_wide_step)
+                pos = max(lo, float(self.config.af_wide_min))
+                logger.info(
+                    "event=autofocus_wide_sweep reason=no_clear_peak range=%.1f..%.1f step=%.1f",
+                    pos,
+                    min(hi, float(self.config.af_wide_max)),
+                    wide,
+                )
+                while pos <= min(hi, float(self.config.af_wide_max)) + 1e-6:
+                    if clamp(pos) not in pts:
+                        await measure(pos)
+                    pos += wide
+                await climb(max(pts, key=lambda p: pts[p]))
+                if not prominent():
+                    values = sorted(pts.values())
+                    raise AutofocusError(
+                        f"No focus peak found over lens {self.config.af_wide_min:.0f}-"
+                        f"{self.config.af_wide_max:.0f}: sharpness {values[0]:.0f}..{values[-1]:.0f} "
+                        f"(document blank, too far/near, or moving)"
+                    )
+
+            best = max(pts, key=lambda p: pts[p])
+            # Park on the winner and confirm with a fresh reading: the last measured position
+            # is rarely the best one, and the lens needs time to get there.
+            await measure(best)
             logger.info(
-                "event=autofocus_refined start=%.2f final=%.2f sharpness_start=%.1f sharpness_final=%.1f samples=%d",
+                "event=autofocus_refined start=%.2f final=%.2f sharpness_start=%.1f sharpness_final=%.1f "
+                "samples=%d curve=%s",
                 start,
-                final,
+                best,
                 start_sharpness,
-                pts[final],
+                pts[best],
                 len(pts),
+                ",".join(f"{p:.2f}:{v:.0f}" for p, v in sorted(pts.items())),
             )
-            return float(final), float(pts[final])
+            return float(best), float(pts[best])
+        except AutofocusError:
+            raise
         except Exception:
             logger.warning("event=autofocus_refine_failed", exc_info=True)
             return None
