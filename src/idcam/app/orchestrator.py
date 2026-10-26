@@ -68,6 +68,9 @@ class ApplicationOrchestrator:
     Exactly one capture transaction at a time. No queue.
     """
 
+    # Failed attempts retried automatically while the same document stays in view.
+    MAX_AUTO_RETRIES_WITH_DOCUMENT = 2
+
     def __init__(self, config: AppConfig, *, use_mock_camera: bool = False) -> None:
         self.config = config
         self.sm = StateMachine()
@@ -107,6 +110,8 @@ class ApplicationOrchestrator:
         self._resume_state = AppState.IDLE
         self._awaiting_clear_scene = False
         self._clear_scene_count = 0
+        self._awaiting_removal_log_count = 0
+        self._consecutive_failures = 0
         self._last_scene_empty = False
         self._last_transition_reason = ""
         self._capture_started = False
@@ -373,9 +378,23 @@ class ApplicationOrchestrator:
             if self._clear_scene_count >= self.config.detection.removal_frames_required:
                 self._awaiting_clear_scene = False
                 self._clear_scene_count = 0
+                self._consecutive_failures = 0
                 logger.info("event=auto_capture_armed reason=scene_cleared_after_failure")
             return
         if self._awaiting_clear_scene and detected:
+            if self._consecutive_failures >= self.MAX_AUTO_RETRIES_WITH_DOCUMENT:
+                # Retrying on the same paper looped forever without ever asking the user to
+                # remove it. After a couple of failed attempts, hold until the scene is clear;
+                # the failure_key in status carries "Please remove the document and try again".
+                self._clear_scene_count = 0
+                self._last_scene_empty = False
+                self._awaiting_removal_log_count += 1
+                if self._awaiting_removal_log_count == 1 or self._awaiting_removal_log_count % 100 == 0:
+                    logger.warning(
+                        "event=waiting_for_removal reason=repeated_failures_document_present failures=%d",
+                        self._consecutive_failures,
+                    )
+                return
             logger.info("event=auto_capture_retry reason=document_still_present_after_failure")
             self._awaiting_clear_scene = False
             self._clear_scene_count = 0
@@ -779,6 +798,7 @@ class ApplicationOrchestrator:
         if not self._claim_state_action():
             return
         await asyncio.sleep(2.0)
+        self._consecutive_failures = 0
         self._removal_count = 0
         self._last_scene_empty = False
         self._transition(AppState.WAITING_FOR_REMOVAL, reason="capture_success")
@@ -924,6 +944,7 @@ class ApplicationOrchestrator:
         self._cleanup_transaction_files()
 
     async def _fail_transaction_and_wait(self, failure_key: str, detail: str) -> None:
+        self._consecutive_failures += 1
         if self._transaction:
             self._transaction.mark_failed(detail)
         self.health.record_failure(detail)
@@ -961,6 +982,7 @@ class ApplicationOrchestrator:
         if dest == AppState.IDLE:
             self._awaiting_clear_scene = True
             self._clear_scene_count = 0
+            self._awaiting_removal_log_count = 0
             self._clear_transaction()
             self._transition(AppState.IDLE, reason=f"{failure_key}")
         else:

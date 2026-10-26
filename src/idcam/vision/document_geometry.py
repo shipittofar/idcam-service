@@ -297,6 +297,14 @@ def _score_geometry(
         ),
     )
 
+    # A region glued to two or more frame borders is the table/background (or a document that
+    # is cut off), not a fully visible document: logs showed locks on the whole frame
+    # (roi=227,0,1406,1079) with confidence 0.85. Demote it so a real paper candidate wins.
+    edge = 3
+    touching = (bx <= edge) + (by <= edge) + (bx + bw >= w - edge) + (by + bh >= h - edge)
+    if touching >= 2:
+        confidence *= 0.4
+
     tl, tr, br, bl = corners
     width_top = math.hypot(tr[0] - tl[0], tr[1] - tl[1])
     width_bottom = math.hypot(br[0] - bl[0], br[1] - bl[1])
