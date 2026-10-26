@@ -26,7 +26,7 @@ pi = [
 led = [
     "Adafruit-Blinka>=8.0",
     "adafruit-circuitpython-pixelbuf>=2.0",
-    "Adafruit-Blinka-Raspberry-Pi5-Neopixel>=1.0",
+    "Adafruit-Blinka-Raspberry-Pi5-Neopixel>=1.0.0rc0",  # only pre-releases (1.0.0rcN) are published
 ]
 dev = [
     "pytest>=8.0",
