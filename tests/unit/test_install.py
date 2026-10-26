@@ -417,3 +417,46 @@ echo SHOULD_NOT_REACH
     assert "SHOULD_NOT_REACH" not in combined
     assert "[4/8]" not in combined
     assert "Creating idcam service user" not in combined
+
+
+class TestLocalAutostart:
+    """setup_local.sh installs a boot service so idCam starts after reboot / first install."""
+
+    TEMPLATE = ROOT / "deploy" / "idcam-local.service.template"
+    SCRIPT = ROOT / "scripts" / "setup_local.sh"
+
+    def test_unit_template_restarts_forever_and_starts_at_boot(self):
+        text = self.TEMPLATE.read_text(encoding="utf-8")
+        for needle in (
+            "WantedBy=multi-user.target",
+            "Restart=always",
+            "StartLimitIntervalSec=0",
+            "User=@USER@",
+            "WorkingDirectory=@ROOT@",
+            "ExecStart=@ROOT@/run.sh",
+            "After=network-online.target",
+        ):
+            assert needle in text, needle
+
+    def test_unit_does_not_depend_on_optional_groups_existing(self):
+        assert "SupplementaryGroups=" not in "\n".join(
+            line for line in self.TEMPLATE.read_text(encoding="utf-8").splitlines() if not line.startswith("#")
+        )
+
+    def test_setup_script_enables_service_and_disables_the_old_one(self):
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        assert "systemctl enable idcam-local" in text
+        assert "systemctl restart idcam-local" in text
+        assert "systemctl disable --now idcam " in text  # old /opt/idcam service: same camera
+        assert "--no-autostart" in text and "--remove-autostart" in text
+        assert "idcam-local.service.template" in text
+
+    def test_setup_script_is_valid_bash(self):
+        import shutil
+        import subprocess
+
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("bash not available")
+        result = subprocess.run([bash, "-n", str(self.SCRIPT)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr

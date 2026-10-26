@@ -1,0 +1,33 @@
+# idCam started from a plain folder (scripts/setup_local.sh), as the login user instead of the
+# dedicated 'idcam' service user. Written to /etc/systemd/system/idcam-local.service with
+# @USER@ and @ROOT@ filled in. Do not enable together with idcam.service: both want the camera.
+[Unit]
+Description=idCam document capture (local folder install)
+After=network-online.target
+Wants=network-online.target
+# A bad config or a missing camera must never make systemd give up: keep retrying.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@ROOT@
+# run.sh loads .env (token) and sets IDCAM_CONFIG, then exec's the app.
+ExecStart=@ROOT@/run.sh
+Environment=PYTHONUNBUFFERED=1
+# Camera (video) and LED strip (gpio, /dev/pio0) access come from the user's own groups, which
+# systemd applies at start (setup_local.sh adds them). No SupplementaryGroups= on purpose: a group
+# that does not exist on this OS would make the unit fail before it starts.
+Restart=always
+RestartSec=10
+# Exit status 2 = invalid configuration: do not loop on it; fix config.yaml, then restart.
+RestartPreventExitStatus=2
+# The app shuts down cleanly on SIGINT/SIGTERM (finishes or abandons the capture, turns the LED off).
+TimeoutStopSec=30
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=idcam-local
+
+[Install]
+WantedBy=multi-user.target

@@ -215,6 +215,22 @@ idCam logs `event=led_unavailable` and carries on.
 | Red, blinking | Error (e.g. low storage) |
 | Off | Shut down |
 
+## Start on boot
+
+- **Production install** (`sudo ./scripts/install.sh`): installs and enables `idcam.service`, so idCam
+  starts at every boot and restarts if it stops.
+- **Folder install** (`bash scripts/setup_local.sh`): installs and starts `idcam-local.service`
+  (runs `./run.sh` as your user from this folder) and enables it for every boot. It also disables
+  the old `idcam.service` because both need the camera. Options: `--no-autostart`,
+  `--remove-autostart`.
+
+```bash
+sudo systemctl status idcam-local       # is it running?
+journalctl -u idcam-local -f            # live logs
+sudo systemctl restart idcam-local      # after editing config.yaml or .env
+sudo systemctl stop idcam-local && ./run.sh   # run by hand for debugging
+```
+
 **Changing the pin or colours:** edit the `led:` block in `config.yaml` (no code change). The data
 pin is `led.gpio_pin` (BCM number, default 18 = physical pin 12), `led.count` is the number of
 LEDs, and `led.colors` overrides the colour of any status as `[R, G, B]`

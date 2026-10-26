@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # One-command local setup: run idCam from THIS folder instead of the systemd service.
 #   bash scripts/setup_local.sh        # install deps, venv, config, then ./run.sh to start
-# Safe to re-run. Does not touch /opt/idcam or the idcam service (it only stops it
-# when you pass --stop-service).
+# Safe to re-run. Does not touch /opt/idcam. By default it also installs a systemd service
+# (idcam-local) so idCam starts by itself after every reboot and after this first install;
+# the old idcam service is stopped and disabled (both need the camera).
+#   --no-autostart       do not install/enable the boot service
+#   --remove-autostart   stop, disable and delete the boot service, then exit
+#   --no-led             skip the WS2812B status strip
+#   --stop-service       also stop and disable the old /opt/idcam service
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,9 +15,14 @@ cd "$ROOT"
 
 STOP_SERVICE=0
 WITH_LED=1
+AUTOSTART=1
+REMOVE_AUTOSTART=0
+LOCAL_UNIT=/etc/systemd/system/idcam-local.service
 for a in "$@"; do
     case "$a" in
         --stop-service) STOP_SERVICE=1 ;;
+        --no-autostart) AUTOSTART=0 ;;
+        --remove-autostart) REMOVE_AUTOSTART=1 ;;
         --no-led) WITH_LED=0 ;;  # skip the WS2812B status strip (GPIO18 by default; see led.gpio_pin)
         -h|--help) sed -n 2,6p "$0"; exit 0 ;;
         *) echo "Unknown option: $a" >&2; exit 2 ;;
@@ -20,9 +30,17 @@ for a in "$@"; do
 done
 
 [[ $EUID -ne 0 ]] || { echo "Run as your normal user (not root); sudo is used only where needed." >&2; exit 1; }
+
+if [[ $REMOVE_AUTOSTART -eq 1 ]]; then
+    sudo systemctl disable --now idcam-local 2>/dev/null || true
+    sudo rm -f "$LOCAL_UNIT"
+    sudo systemctl daemon-reload
+    echo "Boot service idcam-local removed. Run manually with ./run.sh"
+    exit 0
+fi
 command -v apt-get >/dev/null || { echo "This script targets Raspberry Pi OS / Debian (apt)." >&2; exit 1; }
 
-echo "==> 0/5 Camera stack guard"
+echo "==> 0/6 Camera stack guard"
 # Arducam 64MP on Pi 5 needs Arducam's libcamera build (it ships arducam_64mp.json).
 # The stock apt libcamera has no such file, so an upgrade silently kills the camera.
 # If the Arducam tuning file is present, pin the libcamera core packages.
@@ -47,7 +65,7 @@ else
     echo "   (continuing: mock mode still works; real camera will fail until this is fixed)"
 fi
 
-echo "==> 1/5 System packages (sudo)"
+echo "==> 1/6 System packages (sudo)"
 # --no-upgrade: install only what is missing. Never upgrade libcamera/rpicam that
 # already work with the camera (an upgrade can drop the arducam_64mp tuning file).
 sudo apt-get update -y
@@ -60,13 +78,13 @@ for pkg in python3-kms++ rpicam-apps libcamera-apps; do
     fi
 done
 
-echo "==> 2/5 Camera access"
+echo "==> 2/6 Camera access"
 if ! id -nG "$USER" | tr ' ' '\n' | grep -qx video; then
     sudo usermod -aG video "$USER"
     echo "   Added $USER to 'video'. Log out and back in if the camera is not accessible."
 fi
 
-echo "==> 3/5 Python venv (.venv, with system site-packages for Picamera2)"
+echo "==> 3/6 Python venv (.venv, with system site-packages for Picamera2)"
 python3 -m venv --system-site-packages .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -e .
@@ -80,7 +98,7 @@ if [[ $WITH_LED -eq 1 ]]; then
     fi
 fi
 
-echo "==> 4/5 Config (./config.yaml, ./data, ./.env)"
+echo "==> 4/6 Config (./config.yaml, ./data, ./.env)"
 mkdir -p data/tmp data/logs data/run
 if [[ ! -f config.yaml ]]; then
     if sudo test -f /etc/idcam/config.yaml; then
@@ -118,7 +136,7 @@ if [[ ! -f .env ]]; then
     chmod 600 .env
 fi
 
-echo "==> 5/5 Launcher (./run.sh)"
+echo "==> 5/6 Launcher (./run.sh)"
 cat > run.sh <<RUN
 #!/usr/bin/env bash
 cd "\$(dirname "\$0")"
@@ -128,15 +146,43 @@ exec .venv/bin/idcam "\$@"
 RUN
 chmod +x run.sh
 
-if [[ $STOP_SERVICE -eq 1 ]]; then
-    sudo systemctl stop idcam 2>/dev/null || true
-    sudo systemctl disable idcam 2>/dev/null || true
-    echo "   idcam service stopped and disabled."
+if [[ $STOP_SERVICE -eq 1 || $AUTOSTART -eq 1 ]]; then
+    # Two services cannot share the camera: the old /opt/idcam one must not start on boot either.
+    sudo systemctl disable --now idcam 2>/dev/null || true
+    echo "   old idcam service stopped and disabled."
 elif systemctl is-active --quiet idcam 2>/dev/null; then
     echo "   WARNING: the idcam service is running and holds the camera."
     echo "            Run: sudo systemctl stop idcam   (or re-run with --stop-service)"
 fi
 
+echo "==> 6/6 Start on boot (systemd service idcam-local)"
+if [[ $AUTOSTART -eq 1 ]]; then
+    TEMPLATE="$ROOT/deploy/idcam-local.service.template"
+    [[ -f "$TEMPLATE" ]] || { echo "Missing $TEMPLATE" >&2; exit 1; }
+    sed -e "s|@USER@|$USER|g" -e "s|@ROOT@|$ROOT|g" "$TEMPLATE" | sudo tee "$LOCAL_UNIT" >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl enable idcam-local
+    sudo systemctl restart idcam-local
+    sleep 3
+    if systemctl is-active --quiet idcam-local; then
+        echo "   idcam-local is running and will start by itself after every reboot."
+    else
+        echo "   WARNING: idcam-local did not stay up; see: journalctl -u idcam-local -n 50 --no-pager"
+    fi
+else
+    sudo systemctl disable --now idcam-local 2>/dev/null || true
+    echo "   skipped (--no-autostart)"
+fi
+
 echo
-echo "Done. Start with:  ./run.sh"
-echo "Mock camera test:  IDCAM_MOCK_CAMERA=1 ./run.sh"
+if [[ $AUTOSTART -eq 1 ]]; then
+    echo "Done. idCam is running as a service."
+    echo "  status:   sudo systemctl status idcam-local"
+    echo "  logs:     journalctl -u idcam-local -f"
+    echo "  restart:  sudo systemctl restart idcam-local      (after editing config.yaml / .env)"
+    echo "  manual:   sudo systemctl stop idcam-local && ./run.sh"
+    echo "  remove:   bash scripts/setup_local.sh --remove-autostart"
+else
+    echo "Done. Start with:  ./run.sh"
+fi
+echo "Mock camera test:  IDCAM_MOCK_CAMERA=1 ./run.sh   (stop the service first)"
