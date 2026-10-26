@@ -223,15 +223,44 @@ class DebugConfig(BaseModel):
         return stripped
 
 
+LED_STATUS_NAMES = (
+    "starting",  # camera and service starting
+    "ready",  # waiting for a document
+    "working",  # document seen: stabilising, focusing, capturing
+    "processing",  # captured: checking and uploading
+    "success",  # uploaded: take the document away
+    "remove",  # failed again and again: take the document away, then place it again
+    "failure",  # short flash when a capture or upload fails
+    "recovering",
+    "error",
+)
+
+
 class LedConfig(BaseModel):
     """Optional WS2812B status strip on a Raspberry Pi 5 GPIO. Disabled by default."""
 
     enabled: bool = False
-    gpio_pin: int = Field(18, ge=0, le=27)
+    gpio_pin: int = Field(18, ge=0, le=27)  # BCM number of the data pin
     count: int = Field(30, ge=1, le=1024)
     brightness: float = Field(0.2, ge=0.0, le=1.0)
     byteorder: Literal["GRB", "RGB", "GRBW", "RGBW"] = "GRB"
     failure_flash_sec: float = Field(2.0, ge=0.0, le=30.0)
+    # The strip lights the document, so it stays white from "ready" through the capture (a colour
+    # change there changes exposure and what the detector sees). Set false to use a colour for
+    # the "working" phase instead.
+    illuminate_during_capture: bool = True
+    # Per-status colour overrides as [R, G, B], e.g. {"success": [0, 255, 0], "remove": [255, 80, 0]}.
+    colors: dict[str, tuple[int, int, int]] = Field(default_factory=dict)
+
+    @field_validator("colors")
+    @classmethod
+    def validate_colors(cls, value: dict[str, tuple[int, int, int]]) -> dict[str, tuple[int, int, int]]:
+        for name, rgb in value.items():
+            if name not in LED_STATUS_NAMES:
+                raise ValueError(f"led.colors: unknown status {name!r}; use one of {', '.join(LED_STATUS_NAMES)}")
+            if any(not 0 <= channel <= 255 for channel in rgb):
+                raise ValueError(f"led.colors.{name}: each channel must be 0-255")
+        return value
 
 
 class UploadImageConfig(BaseModel):

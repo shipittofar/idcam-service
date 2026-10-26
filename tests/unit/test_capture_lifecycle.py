@@ -404,3 +404,23 @@ class TestMotionBeforeShutter:
 
         assert await orch._check_motion_abort() is True
         assert orch.sm.state == AppState.CAPTURING
+
+
+class TestLedGuidanceInFlow:
+    @pytest.mark.asyncio
+    async def test_repeated_failures_with_document_present_show_remove_hint_until_cleared(self, app_config):
+        orch = _orch(app_config)
+        orch.sm.state = AppState.IDLE
+        orch._awaiting_clear_scene = True
+        orch._consecutive_failures = orch.MAX_AUTO_RETRIES_WITH_DOCUMENT
+        orch.detector.update_baseline(_empty_frame())
+        orch._safe_preview = AsyncMock(return_value=_document_frame())
+        assert orch.led._hint is None
+
+        await orch._idle_tick()
+        assert orch.led._hint is not None  # tell the user to take the document away
+
+        orch._safe_preview = AsyncMock(return_value=_empty_frame())
+        for _ in range(12):  # the detector releases its latch after a few empty frames
+            await orch._idle_tick()
+        assert orch.led._hint is None  # removed: back to the ready colour

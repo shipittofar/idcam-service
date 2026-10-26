@@ -334,3 +334,58 @@ async def test_orchestrator_failure_flashes_red_then_restores(orch):
     assert orch.sm.state == AppState.IDLE
     assert orch.led.current_color(now + 0.5) == RED
     assert orch.led.current_color(now + 2.5) == WHITE
+
+
+class TestGuidanceColours:
+    def test_default_config_uses_the_standard_table(self):
+        table, extras = led_mod.build_patterns(LedConfig())
+        assert all(table[state] == pattern for state, pattern in STATE_PATTERNS.items())
+        assert extras["remove"].color == led_mod.ORANGE
+
+    def test_every_phase_has_a_distinct_meaning(self):
+        table, extras = led_mod.build_patterns(LedConfig())
+        assert table[AppState.IDLE].color == WHITE  # place a document
+        assert table[AppState.FOCUSING].color == WHITE  # hold still, lit for the camera
+        assert table[AppState.UPLOADING].color == BLUE  # captured: wait
+        assert table[AppState.SUCCESS].color == GREEN  # done: remove the document
+        assert extras["remove"].color not in (WHITE, BLUE, GREEN, RED, YELLOW)  # failed: remove, retry
+
+    def test_colours_can_be_overridden_per_status_without_touching_the_blink_style(self):
+        cfg = LedConfig(colors={"success": (0, 128, 255), "processing": (255, 0, 255)})
+        table, _ = led_mod.build_patterns(cfg)
+        assert table[AppState.SUCCESS].color == (0, 128, 255) and table[AppState.SUCCESS].mode == "solid"
+        assert table[AppState.UPLOADING].color == (255, 0, 255) and table[AppState.UPLOADING].mode == "blink"
+
+    def test_unknown_status_or_bad_channel_is_rejected(self):
+        with pytest.raises(ValueError, match="unknown status"):
+            LedConfig(colors={"banana": (1, 2, 3)})
+        with pytest.raises(ValueError, match="0-255"):
+            LedConfig(colors={"success": (0, 300, 0)})
+
+    def test_working_phase_can_use_its_own_colour(self):
+        table, _ = led_mod.build_patterns(LedConfig(illuminate_during_capture=False))
+        assert table[AppState.FOCUSING].color == led_mod.CYAN
+        assert table[AppState.IDLE].color == WHITE
+
+    def test_gpio_pin_is_configurable_and_validated(self):
+        assert LedConfig().gpio_pin == 18
+        assert LedConfig(gpio_pin=12).gpio_pin == 12
+        with pytest.raises(ValueError):
+            LedConfig(gpio_pin=40)
+
+    def test_remove_hint_blinks_orange_and_any_transition_clears_it(self):
+        led = LedIndicator(LedConfig(enabled=True), backend=FakeBackend())
+        led.set_state(AppState.IDLE)
+        led.set_remove_hint(True)
+        on = led.current_color(now=led._hint_since + 0.1)
+        off = led.current_color(now=led._hint_since + 0.6)
+        assert on == led_mod.ORANGE and off == OFF
+        led.set_state(AppState.DOCUMENT_DETECTED)
+        assert led.current_color(now=time.monotonic()) == WHITE
+
+    def test_failure_flash_wins_over_the_hint(self):
+        led = LedIndicator(LedConfig(enabled=True), backend=FakeBackend())
+        led.set_state(AppState.IDLE)
+        led.set_remove_hint(True)
+        led.flash_failure(5.0)
+        assert led.current_color() == RED

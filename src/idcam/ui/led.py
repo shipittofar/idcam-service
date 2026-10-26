@@ -26,6 +26,8 @@ Color = tuple[int, int, int]
 OFF: Color = (0, 0, 0)
 WHITE: Color = (255, 255, 255)
 YELLOW: Color = (255, 255, 0)
+ORANGE: Color = (255, 80, 0)
+CYAN: Color = (0, 200, 255)
 BLUE: Color = (0, 0, 255)
 GREEN: Color = (0, 255, 0)
 RED: Color = (255, 0, 0)
@@ -60,6 +62,10 @@ RECOVERING = LedPattern(YELLOW, "blink", 1.0)
 FAULT = LedPattern(RED, "blink", 1.0)
 DARK = LedPattern(OFF)
 FAILURE_FLASH = LedPattern(RED)
+# Failed repeatedly and the document is still there: take it away, then place it again.
+REMOVE_HINT = LedPattern(ORANGE, "blink", 0.8)
+# "working" colour when illuminate_during_capture is off.
+WORKING_COLORED = LedPattern(CYAN, "pulse", 1.5)
 
 STATE_PATTERNS: dict[AppState, LedPattern] = {
     AppState.BOOT: STARTING,
@@ -82,6 +88,61 @@ STATE_PATTERNS: dict[AppState, LedPattern] = {
     AppState.ERROR: FAULT,
     AppState.SHUTDOWN: DARK,
 }
+
+
+_STARTUP_STATES = (AppState.BOOT, AppState.INITIALIZING, AppState.CAMERA_INITIALIZING, AppState.CAMERA_READY)
+_WORKING_STATES = (
+    AppState.DOCUMENT_DETECTED,
+    AppState.WAITING_FOR_STABILITY,
+    AppState.FOCUSING,
+    AppState.FOCUS_VERIFICATION,
+    AppState.CAPTURING,
+)
+_PROCESSING_STATES = (
+    AppState.IMAGE_VALIDATION,
+    AppState.UPLOADING,
+    AppState.WAITING_FOR_SERVER,
+    AppState.PROCESSING_RESPONSE,
+)
+_SUCCESS_STATES = (AppState.SUCCESS, AppState.WAITING_FOR_REMOVAL)
+
+
+def _recolor(pattern: LedPattern, color: Color | None) -> LedPattern:
+    if color is None or tuple(color) == pattern.color:
+        return pattern
+    return LedPattern(tuple(color), pattern.mode, pattern.period_sec)  # type: ignore[arg-type]
+
+
+def build_patterns(config: LedConfig) -> tuple[dict[AppState, LedPattern], dict[str, LedPattern]]:
+    """State -> pattern table and the named extras (remove hint, failure flash) for a config.
+
+    With the default config this is exactly ``STATE_PATTERNS``.
+    """
+    colors = {name: tuple(rgb) for name, rgb in config.colors.items()}
+    table = dict(STATE_PATTERNS)
+    working = READY if config.illuminate_during_capture else WORKING_COLORED
+    groups = {
+        "starting": (_STARTUP_STATES, STARTING),
+        "ready": ((AppState.IDLE,), READY),
+        "working": (_WORKING_STATES, working),
+        "processing": (_PROCESSING_STATES, PROCESSING),
+        "success": (_SUCCESS_STATES, DONE),
+        "recovering": ((AppState.RECOVERY,), RECOVERING),
+        "error": ((AppState.ERROR,), FAULT),
+    }
+    for name, (states, base) in groups.items():
+        pattern = _recolor(base, colors.get(name))
+        for state in states:
+            table[state] = pattern
+    # "working" follows "ready" when it is meant to be the same light on the document.
+    if config.illuminate_during_capture and "working" not in colors:
+        for state in _WORKING_STATES:
+            table[state] = table[AppState.IDLE]
+    extras = {
+        "remove": _recolor(REMOVE_HINT, colors.get("remove")),
+        "failure": _recolor(FAILURE_FLASH, colors.get("failure")),
+    }
+    return table, extras
 
 
 class LedBackend(Protocol):
@@ -126,8 +187,11 @@ class LedIndicator:
         self.config = config
         self._backend = backend
         self._lock = threading.Lock()
-        self._pattern = STATE_PATTERNS[AppState.BOOT]
+        self._patterns, self._extras = build_patterns(config)
+        self._pattern = self._patterns[AppState.BOOT]
         self._pattern_since = time.monotonic()
+        self._hint: LedPattern | None = None
+        self._hint_since = 0.0
         self._flash: LedPattern | None = None
         self._flash_until = 0.0
         self._stop = threading.Event()
@@ -163,19 +227,29 @@ class LedIndicator:
         )
 
     def set_state(self, state: AppState) -> None:
-        pattern = STATE_PATTERNS.get(state, FAULT)
+        pattern = self._patterns.get(state, FAULT)
         with self._lock:
+            self._hint = None  # every transition ends a hint; the caller re-raises it if still needed
             if state == AppState.SHUTDOWN:
                 self._flash = None
             if pattern is not self._pattern:
                 self._pattern = pattern
                 self._pattern_since = time.monotonic()
 
+    def set_remove_hint(self, active: bool) -> None:
+        """Blink the "remove the document" colour on top of the current (IDLE) pattern."""
+        with self._lock:
+            if active and self._hint is None:
+                self._hint = self._extras["remove"]
+                self._hint_since = time.monotonic()
+            elif not active:
+                self._hint = None
+
     def flash_failure(self, seconds: float | None = None) -> None:
         """Show solid red for a moment, then return to the current state's pattern."""
         duration = self.config.failure_flash_sec if seconds is None else seconds
         with self._lock:
-            self._flash = FAILURE_FLASH
+            self._flash = self._extras["failure"]
             self._flash_until = time.monotonic() + duration
 
     def current_color(self, now: float | None = None) -> Color:
@@ -184,6 +258,8 @@ class LedIndicator:
             if self._flash is not None and now < self._flash_until:
                 return self._flash.color
             self._flash = None
+            if self._hint is not None:
+                return self._hint.color_at(now - self._hint_since)
             return self._pattern.color_at(now - self._pattern_since)
 
     def stop(self) -> None:

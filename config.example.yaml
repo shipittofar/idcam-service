@@ -101,13 +101,29 @@ debug:
 
 # WS2812B status LED strip (Raspberry Pi 5) — off by default.
 # Needs the LED libraries: run the installer with --with-led.
-# White = ready and throughout detection / focusing / capturing,
-# blue blinking = validating and uploading, green = done (remove document),
-# red for 2 s = capture failed, yellow blinking = recovering, red blinking = error.
+# What the colours tell the user:
+#   white         ready - place the document (stays white while it is detected, focused and
+#                 captured, because the strip also lights the document)
+#   blue blinking captured - checking and uploading, wait
+#   green         done - remove the document
+#   orange blink  failed again and again - remove the document, then place it again
+#   red 2 s       capture or upload failed;  red blinking = error
+#   yellow blink  recovering
 led:
   enabled: false
-  gpio_pin: 18          # BCM number; GPIO18 is physical pin 12
+  gpio_pin: 18          # BCM number of the data pin; GPIO18 is physical pin 12. Change it here.
   count: 30
   brightness: 0.2       # 0.0 - 1.0
   byteorder: GRB
   failure_flash_sec: 2.0
+  illuminate_during_capture: true   # false = use a colour (cyan) while capturing instead of white
+  # colors:             # optional [R, G, B] overrides per status
+  #   starting: [0, 0, 255]
+  #   ready: [255, 255, 255]
+  #   working: [255, 255, 255]
+  #   processing: [0, 0, 255]
+  #   success: [0, 255, 0]
+  #   remove: [255, 80, 0]
+  #   failure: [255, 0, 0]
+  #   recovering: [255, 255, 0]
+  #   error: [255, 0, 0]

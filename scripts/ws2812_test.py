@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Stand-alone WS2812B strip check for Raspberry Pi 5 (no idCam config needed).
 
-Cycles through the colours the idCam status indicator uses. Stop the idcam
-service first so both do not drive the strip at once:
+Cycles through the colours the idCam status indicator uses, naming what each means. Stop the
+idcam service first so both do not drive the strip at once:
 
     sudo systemctl stop idcam
-    /opt/idcam/venv/bin/python scripts/ws2812_test.py
+    /opt/idcam/venv/bin/python scripts/ws2812_test.py                 # GPIO18, 30 LEDs
+    /opt/idcam/venv/bin/python scripts/ws2812_test.py --pin 12 --count 60
+    /opt/idcam/venv/bin/python scripts/ws2812_test.py --config config.yaml   # use its led: block
 """
 
+import argparse
 import sys
 import time
 
@@ -15,11 +18,40 @@ import adafruit_pixelbuf
 import board
 from adafruit_raspberry_pi5_neopixel_write import neopixel_write
 
-# ===== Configuration =====
+# ===== Defaults (override with the options above) =====
 LED_COUNT = 30
-LED_PIN = board.D18
+LED_PIN_NUMBER = 18
 BRIGHTNESS = 0.2
 DELAY = 2
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="WS2812B strip test")
+    parser.add_argument("--pin", type=int, help="BCM data pin (default 18 = physical pin 12)")
+    parser.add_argument("--count", type=int, help="number of LEDs")
+    parser.add_argument("--brightness", type=float, help="0.0 - 1.0")
+    parser.add_argument("--config", help="read pin/count/brightness/byteorder from the led: block of this YAML")
+    return parser.parse_args()
+
+
+def load_settings(args):
+    settings = {"pin": LED_PIN_NUMBER, "count": LED_COUNT, "brightness": BRIGHTNESS, "byteorder": "GRB"}
+    if args.config:
+        import yaml
+
+        with open(args.config, encoding="utf-8") as fh:
+            led = (yaml.safe_load(fh) or {}).get("led") or {}
+        settings["pin"] = int(led.get("gpio_pin", settings["pin"]))
+        settings["count"] = int(led.get("count", settings["count"]))
+        settings["brightness"] = float(led.get("brightness", settings["brightness"]))
+        settings["byteorder"] = str(led.get("byteorder", settings["byteorder"]))
+    if args.pin is not None:
+        settings["pin"] = args.pin
+    if args.count is not None:
+        settings["count"] = args.count
+    if args.brightness is not None:
+        settings["brightness"] = args.brightness
+    return settings
 
 
 class Pi5Pixelbuf(adafruit_pixelbuf.PixelBuf):
@@ -32,28 +64,31 @@ class Pi5Pixelbuf(adafruit_pixelbuf.PixelBuf):
 
 
 def main():
+    cfg = load_settings(parse_args())
+    pin = getattr(board, f"D{cfg['pin']}")
     print("================================")
     print(" Raspberry Pi 5 - WS2812B Test")
     print("================================")
-    print(f"LED Count: {LED_COUNT}")
-    print("Data Pin: GPIO18 (Physical Pin 12)")
-    print(f"Brightness: {int(BRIGHTNESS * 100)}%")
+    print(f"LED Count: {cfg['count']}")
+    print(f"Data Pin: GPIO{cfg['pin']}")
+    print(f"Brightness: {int(cfg['brightness'] * 100)}%")
     print("Initializing LED strip...", flush=True)
 
     pixels = Pi5Pixelbuf(
-        LED_PIN,
-        LED_COUNT,
+        pin,
+        cfg["count"],
         auto_write=False,
-        byteorder="GRB",
-        brightness=BRIGHTNESS,
+        byteorder=cfg["byteorder"],
+        brightness=cfg["brightness"],
     )
 
     colors = [
-        ("Yellow", (255, 255, 0)),
-        ("Blue", (0, 0, 255)),
-        ("White", (255, 255, 255)),
-        ("Red", (255, 0, 0)),
-        ("Green", (0, 255, 0)),
+        ("White      = ready: place the document (also lights it while it is captured)", (255, 255, 255)),
+        ("Blue       = captured: checking and uploading, wait", (0, 0, 255)),
+        ("Green      = done: remove the document", (0, 255, 0)),
+        ("Orange     = failed again: remove the document, then place it again", (255, 80, 0)),
+        ("Red        = capture or upload failed (short flash) / error (blinking)", (255, 0, 0)),
+        ("Yellow     = recovering", (255, 255, 0)),
     ]
 
     try:

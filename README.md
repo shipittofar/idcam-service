@@ -203,16 +203,27 @@ idCam logs `event=led_unavailable` and carries on.
    `sudo systemctl stop idcam && /opt/idcam/venv/bin/python scripts/ws2812_test.py`
 4. Set `led.enabled: true` in `/etc/idcam/config.yaml` and restart the service.
 
-| Colour | Meaning |
-|--------|---------|
-| Blue, pulsing | Starting up / initializing camera |
-| White | Ready — place a document; stays white through detection, focusing and capture |
-| Blue, blinking | Validating and uploading |
+| Colour | Meaning (what to do) |
+|--------|----------------------|
+| Blue, pulsing | Starting up / initializing camera — wait |
+| White | Ready — place a document; stays white through detection, focusing and capture (hold it still) |
+| Blue, blinking | Captured; validating and uploading — wait |
 | Green | Done — remove the document |
+| Orange, blinking | Failed again and again — remove the document, then place it again |
 | Red for 2 s | Capture or upload failed, then back to the current state's colour |
 | Yellow, blinking | Recovering |
 | Red, blinking | Error (e.g. low storage) |
 | Off | Shut down |
+
+**Changing the pin or colours:** edit the `led:` block in `config.yaml` (no code change). The data
+pin is `led.gpio_pin` (BCM number, default 18 = physical pin 12), `led.count` is the number of
+LEDs, and `led.colors` overrides the colour of any status as `[R, G, B]`
+(`starting`, `ready`, `working`, `processing`, `success`, `remove`, `failure`, `recovering`,
+`error`). Test a pin before changing the config:
+`python scripts/ws2812_test.py --pin 12 --count 60` (or `--config config.yaml`).
+
+`scripts/setup_local.sh` installs the LED libraries, adds your user to the `gpio` group and turns
+the strip on in `config.yaml`; pass `--no-led` to skip it.
 
 If the strip lights the capture area, the colour change between states also
 changes the scene the detector sees. The strip therefore stays the same white

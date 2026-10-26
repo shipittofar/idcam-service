@@ -405,6 +405,7 @@ class ApplicationOrchestrator:
                 self._awaiting_clear_scene = False
                 self._clear_scene_count = 0
                 self._consecutive_failures = 0
+                self.led.set_remove_hint(False)
                 logger.info("event=auto_capture_armed reason=scene_cleared_after_failure")
             return
         if self._awaiting_clear_scene and detected:
@@ -415,6 +416,7 @@ class ApplicationOrchestrator:
                 self._clear_scene_count = 0
                 self._last_scene_empty = False
                 self._awaiting_removal_log_count += 1
+                self.led.set_remove_hint(True)
                 if self._awaiting_removal_log_count == 1 or self._awaiting_removal_log_count % 100 == 0:
                     logger.warning(
                         "event=waiting_for_removal reason=repeated_failures_document_present failures=%d",
