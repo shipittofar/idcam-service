@@ -67,3 +67,32 @@ class TestImageValidator:
         validator = ImageValidator(quality_config)
         with pytest.raises(ImageValidationError):
             validator.validate(path)
+
+
+class TestLargeStillValidation:
+    """64 MP stills are measured at 1/4 scale; reported size stays the full-resolution size."""
+
+    @staticmethod
+    def _page(path, blur_sigma=0.0):
+        import cv2
+
+        rng = np.random.default_rng(0)
+        img = np.full((4400, 5800, 3), 170, dtype=np.uint8)
+        for i in range(40):
+            cv2.putText(img, "NAME SURNAME 1234567890 ABC", (400, 300 + i * 90), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (20, 20, 20), 4)
+        img = (img + rng.normal(0, 3, img.shape)).clip(0, 255).astype(np.uint8)
+        if blur_sigma:
+            img = cv2.GaussianBlur(img, (0, 0), blur_sigma)
+        cv2.imwrite(str(path), img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+    def test_sharp_large_still_passes_and_keeps_full_size(self, tmp_path):
+        path = tmp_path / "big_sharp.jpg"
+        self._page(path)
+        result = ImageValidator(QualityConfig(min_file_bytes=1000)).validate(path)
+        assert (result.width, result.height) == (5800, 4400)
+
+    def test_blurry_large_still_is_rejected(self, tmp_path):
+        path = tmp_path / "big_blur.jpg"
+        self._page(path, blur_sigma=8.0)
+        with pytest.raises(ImageValidationError, match="blurry"):
+            ImageValidator(QualityConfig(min_file_bytes=1000)).validate(path)

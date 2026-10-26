@@ -73,12 +73,18 @@ class ImageValidator:
         except Exception as exc:
             raise ImageValidationError(f"JPEG truncated or incomplete: {exc}") from exc
 
-        frame = cv2.imread(str(path))
+        # 64 MP stills: decode at 1/4 size (JPEG DCT scaling, ~2x faster and far less memory) and
+        # measure sharpness there. At 9152x6944 the lens resolves less than the sensor, so
+        # pixel-level Laplacian variance is tiny even for a well-focused page (observed 9-13);
+        # at 1/4 scale it is comparable with the thresholds. Smaller images decode in full.
+        reduce = 4 if max(width, height) >= 4000 else 1
+        flag = cv2.IMREAD_REDUCED_COLOR_4 if reduce == 4 else cv2.IMREAD_COLOR
+        frame = cv2.imread(str(path), flag)
         if frame is None:
             raise ImageValidationError("OpenCV could not decode image")
 
         cv_height, cv_width = frame.shape[:2]
-        if cv_width != width or cv_height != height:
+        if abs(cv_width * reduce - width) > reduce or abs(cv_height * reduce - height) > reduce:
             raise ImageValidationError("Image dimension mismatch between PIL and OpenCV")
 
         if width < self.config.min_width or height < self.config.min_height:
@@ -104,7 +110,11 @@ class ImageValidator:
                 (width, height),
                 scaler_crop=scaler_crop,
             )
-            document_sharpness = still_sharpness(frame, roi=still_doc_roi)
+            roi_for_frame = still_doc_roi
+            if reduce > 1:
+                rx, ry, rw, rh = still_doc_roi
+                roi_for_frame = (rx // reduce, ry // reduce, max(1, rw // reduce), max(1, rh // reduce))
+            document_sharpness = still_sharpness(frame, roi=roi_for_frame)
 
         logger.info(
             "event=pipeline_stage stage=image_validated "
