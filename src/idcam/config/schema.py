@@ -136,7 +136,7 @@ class StateTimeoutsConfig(BaseModel):
     camera_initializing: float = Field(120.0, gt=0, le=600)
     document_detected: float = Field(5.0, gt=0, le=60)
     waiting_for_stability: float = Field(15.0, gt=0, le=120)
-    focusing: float = Field(10.0, gt=0, le=120)
+    focusing: float = Field(25.0, gt=0, le=120)  # AF cycle + lens refinement can take ~10 s
     focus_verification: float = Field(5.0, gt=0, le=60)
     capturing: float = Field(45.0, gt=0, le=300)
     image_validation: float = Field(10.0, gt=0, le=60)

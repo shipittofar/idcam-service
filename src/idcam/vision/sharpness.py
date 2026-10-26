@@ -39,6 +39,38 @@ def inner_roi(
     return inner
 
 
+def inscribed_focus_roi(
+    corners: tuple[tuple[int, int], ...],
+    frame_shape: tuple[int, ...],
+    inset_fraction: float = 0.12,
+) -> tuple[int, int, int, int]:
+    """Largest axis-aligned rectangle lying inside the document quadrilateral (after an inset).
+
+    The quad's bounding box includes desk for a rotated or perspective-skewed page, so autofocus
+    and the sharpness metric would partly look at the background. Falls back to ``inner_roi`` of
+    the bounding box when the quad is degenerate.
+    """
+    pts = np.array(corners, dtype=np.float32).reshape(-1, 2)
+    xs, ys = pts[:, 0], pts[:, 1]
+    bbox = (int(xs.min()), int(ys.min()), int(xs.max() - xs.min()), int(ys.max() - ys.min()))
+    if len(pts) != 4 or cv2.contourArea(pts) < 16.0:
+        return inner_roi(clip_roi(bbox, frame_shape), inset_fraction, frame_shape)
+    center = pts.mean(axis=0)
+    inset = min(max(float(inset_fraction), 0.0), 0.4)
+    # Same meaning as inner_roi: ``inset`` is cut from each side, so scale by 1 - 2*inset.
+    shrunk = (center + (pts - center) * (1.0 - 2.0 * inset)).astype(np.float32)
+    half_w, half_h = bbox[2] / 2.0, bbox[3] / 2.0
+    for f in np.arange(1.0, 0.1, -0.02):
+        rect = [
+            (float(center[0] + sx * half_w * f), float(center[1] + sy * half_h * f))
+            for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+        ]
+        if all(cv2.pointPolygonTest(shrunk, pt, False) >= 0 for pt in rect):
+            x0, y0 = rect[0]
+            return clip_roi((int(round(x0)), int(round(y0)), int(round(2 * half_w * f)), int(round(2 * half_h * f))), frame_shape)
+    return inner_roi(clip_roi(bbox, frame_shape), inset_fraction, frame_shape)
+
+
 def _gray_patch(frame: np.ndarray, roi: tuple[int, int, int, int] | None, roi_fraction: float) -> np.ndarray:
     if frame.ndim == 3:
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)

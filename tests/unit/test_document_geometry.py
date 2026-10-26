@@ -237,3 +237,60 @@ class TestDownscaledDetection:
         geom = detect_document_geometry(frame)
 
         assert geom is None or geom.confidence < 0.42
+
+
+class TestInscribedFocusRoi:
+    @staticmethod
+    def _inside(corners, roi):
+        poly = np.array(corners, dtype=np.float32)
+        x, y, w, h = roi
+        return all(
+            cv2.pointPolygonTest(poly, (float(px), float(py)), False) >= 0
+            for px, py in ((x, y), (x + w, y), (x + w, y + h), (x, y + h))
+        )
+
+    def test_rotated_page_focus_roi_stays_on_paper_not_desk(self):
+        from idcam.vision.sharpness import inscribed_focus_roi
+
+        corners = ((600, 200), (1300, 330), (1150, 950), (480, 780))
+        roi = inscribed_focus_roi(corners, (1080, 1920, 3), 0.12)
+        assert self._inside(corners, roi)
+        assert roi[2] > 250 and roi[3] > 250  # still a useful window, not a sliver
+
+    def test_axis_aligned_page_focus_roi_matches_inset_bbox(self):
+        from idcam.vision.sharpness import inscribed_focus_roi
+
+        corners = ((500, 100), (1200, 100), (1200, 900), (500, 900))
+        x, y, w, h = inscribed_focus_roi(corners, (1080, 1920, 3), 0.12)
+        assert abs(x - 584) <= 20 and abs(y - 196) <= 20
+        assert abs(w - 532) <= 40 and abs(h - 608) <= 40
+
+    def test_degenerate_quad_falls_back_to_bbox_inset(self):
+        from idcam.vision.sharpness import inscribed_focus_roi
+
+        roi = inscribed_focus_roi(((10, 10), (10, 10), (10, 10), (10, 10)), (480, 640, 3), 0.12)
+        assert roi[2] >= 1 and roi[3] >= 1
+
+
+class TestOutlineAlignment:
+    def test_rotated_page_outline_is_tight(self):
+        """The detected box follows the page itself (scored by how exactly the outline sits on its edge)."""
+        frame = np.full((1080, 1920, 3), (70, 80, 75), dtype=np.uint8)
+        pts = np.array([[600, 200], [1300, 330], [1150, 950], [480, 780]], np.int32)
+        cv2.fillPoly(frame, [pts], (228, 226, 220))
+        for i in range(18):
+            cv2.putText(frame, "NAME SURNAME 1234567890", (680, 330 + i * 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (40, 40, 40), 1)
+
+        geom = detect_document_geometry(frame)
+
+        assert geom is not None
+        gt = (480, 200, 820, 750)
+        x, y, w, h = geom.bbox
+        inter = max(0, min(x + w, gt[0] + gt[2]) - max(x, gt[0])) * max(0, min(y + h, gt[1] + gt[3]) - max(y, gt[1]))
+        iou = inter / (w * h + gt[2] * gt[3] - inter)
+        assert iou > 0.85
+
+    def test_empty_desk_gives_no_document(self):
+        frame = np.full((1080, 1920, 3), (70, 80, 75), dtype=np.uint8)
+        noise = np.random.default_rng(0).normal(0, 4, frame.shape)
+        assert detect_document_geometry((frame + noise).clip(0, 255).astype(np.uint8)) is None

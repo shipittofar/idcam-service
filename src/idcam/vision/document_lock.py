@@ -8,7 +8,7 @@ import time
 from idcam.config.schema import DetectionConfig
 from idcam.logging.setup import get_logger
 from idcam.vision.document_geometry import DocumentGeometry, smooth_corners
-from idcam.vision.sharpness import clip_roi, inner_roi
+from idcam.vision.sharpness import clip_roi, inscribed_focus_roi
 
 logger = get_logger("vision.document_lock")
 
@@ -61,10 +61,10 @@ class DocumentLock:
 
     def lock(self, frame, geometry: DocumentGeometry) -> None:
         roi = clip_roi(geometry.bbox, frame.shape)
-        focus = inner_roi(
-            roi,
-            inset_fraction=self.config.focus_roi_inset_fraction,
-            frame_shape=frame.shape,
+        focus = inscribed_focus_roi(
+            geometry.corners,
+            frame.shape,
+            self.config.focus_roi_inset_fraction,
         )
         self._state = DocumentLockState(
             locked=True,
@@ -99,10 +99,10 @@ class DocumentLock:
         xs = [c[0] for c in smoothed_corners]
         ys = [c[1] for c in smoothed_corners]
         roi = clip_roi((min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)), frame.shape)
-        focus = inner_roi(
-            roi,
-            inset_fraction=self.config.focus_roi_inset_fraction,
-            frame_shape=frame.shape,
+        focus = inscribed_focus_roi(
+            smoothed_corners,
+            frame.shape,
+            self.config.focus_roi_inset_fraction,
         )
         self._state.corners = smoothed_corners
         self._state.roi = roi

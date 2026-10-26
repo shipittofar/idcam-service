@@ -14,7 +14,7 @@ from idcam.logging.setup import get_logger
 from idcam.vision.document_geometry import corner_motion, detect_document_geometry
 from idcam.vision.document_lock import DocumentLock
 from idcam.vision.motion import illumination_change, normalize_gray, structural_motion, to_gray
-from idcam.vision.sharpness import clip_roi, inner_roi, roi_rect
+from idcam.vision.sharpness import clip_roi, inner_roi, inscribed_focus_roi, roi_rect
 
 logger = get_logger("vision.document_detector")
 
@@ -130,10 +130,10 @@ class DocumentDetector:
         self._last_geometry = geom
         if geom:
             self._last_document_roi = geom.bbox
-            self._last_focus_roi = inner_roi(
-                geom.bbox,
-                inset_fraction=self.config.focus_roi_inset_fraction,
-                frame_shape=frame.shape,
+            self._last_focus_roi = inscribed_focus_roi(
+                geom.corners,
+                frame.shape,
+                self.config.focus_roi_inset_fraction,
             )
             self._last_roi_size = (geom.bbox[2], geom.bbox[3])
             self._last_edge_density = min(1.0, geom.edge_strength / 120.0)

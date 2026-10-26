@@ -214,6 +214,27 @@ def _edge_strength_in_region(gray: np.ndarray, bbox: tuple[int, int, int, int]) 
     return float(np.mean(cv2.magnitude(gx, gy)))
 
 
+def _edge_alignment(corners: tuple[tuple[int, int], ...], grad_near: np.ndarray, grad_local_max: np.ndarray) -> float:
+    """0..1: how exactly the quad outline sits on the strongest local edge (1 = on the edge).
+
+    A candidate that includes a halo/shadow around the page has its outline a few pixels off the
+    real paper edge, so it scores lower than the tight outline of the page itself.
+    """
+    h, w = grad_near.shape
+    on_edge = 0.0
+    peak = 0.0
+    for i in range(4):
+        x0, y0 = corners[i]
+        x1, y1 = corners[(i + 1) % 4]
+        n = max(8, int(math.hypot(x1 - x0, y1 - y0) / 2))
+        ts = np.linspace(0.0, 1.0, n)
+        xs = np.clip(np.rint(x0 + (x1 - x0) * ts).astype(int), 0, w - 1)
+        ys = np.clip(np.rint(y0 + (y1 - y0) * ts).astype(int), 0, h - 1)
+        on_edge += float(np.sum(grad_near[ys, xs]))
+        peak += float(np.sum(grad_local_max[ys, xs]))
+    return on_edge / peak if peak > 1e-6 else 0.0
+
+
 def _contour_to_corners(contour: np.ndarray) -> tuple[tuple[int, int], ...]:
     peri = cv2.arcLength(contour, True)
     for eps in (0.02, 0.03, 0.05, 0.08):
@@ -247,6 +268,7 @@ def _score_geometry(
     max_area_fraction: float,
     min_rectangularity: float,
     min_contrast: float,
+    edge_maps: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[DocumentGeometry | None, GeometryCandidateDiag]:
     h, w = int(frame_shape[0]), int(frame_shape[1])
     frame_area = float(w * h)
@@ -306,6 +328,9 @@ def _score_geometry(
         ),
     )
 
+    if edge_maps is not None:
+        confidence *= _ALIGN_FLOOR + (1.0 - _ALIGN_FLOOR) * min(1.0, _edge_alignment(corners, *edge_maps))
+
     # A region glued to two or more frame borders is the table/background (or a document that
     # is cut off), not a fully visible document: logs showed locks on the whole frame
     # (roi=227,0,1406,1079) with confidence 0.85. Demote it so a real paper candidate wins.
@@ -362,6 +387,7 @@ def _collect_from_mask(
     max_area_fraction: float,
     min_rectangularity: float,
     min_contrast: float,
+    edge_maps: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[list[tuple[DocumentGeometry, GeometryCandidateDiag]], list[GeometryCandidateDiag]]:
     h, w = frame_shape[:2]
     frame_area = float(w * h)
@@ -408,6 +434,7 @@ def _collect_from_mask(
             max_area_fraction=max_area_fraction,
             min_rectangularity=min_rectangularity,
             min_contrast=min_contrast,
+            edge_maps=edge_maps,
         )
         reports.append(diag)
         if geom is not None:
@@ -417,6 +444,8 @@ def _collect_from_mask(
 
 
 _DETECT_MAX_DIM = 640
+_ALIGN_WINDOW = 15  # px at working resolution: search radius for the true edge next to the outline
+_ALIGN_FLOOR = 0.35  # confidence multiplier for an outline that is nowhere on an edge
 
 
 def _rescale_geometry(geom: DocumentGeometry, factor: float, frame_shape: tuple[int, ...]) -> DocumentGeometry:
@@ -468,6 +497,13 @@ def _detect_all(
     scale = ratio  # kernels shrink only by the factor the frame was shrunk
 
     gray = _prepare_gray(work)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    grad = cv2.magnitude(gx, gy)
+    edge_maps = (
+        cv2.dilate(grad, np.ones((3, 3), np.uint8)),
+        cv2.dilate(grad, np.ones((_ALIGN_WINDOW, _ALIGN_WINDOW), np.uint8)),
+    )
     all_geoms: list[DocumentGeometry] = []
     all_reports: list[GeometryCandidateDiag] = []
 
@@ -481,6 +517,7 @@ def _detect_all(
             max_area_fraction=max_area_fraction,
             min_rectangularity=min_rectangularity,
             min_contrast=min_contrast,
+            edge_maps=edge_maps,
         )
         all_reports.extend(reports)
         if geoms:
