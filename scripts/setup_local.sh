@@ -55,7 +55,7 @@ if [[ ! -f config.yaml ]]; then
     chmod 600 config.yaml
 fi
 # Point the service-owned directories (tmp, logs, /run status + admin socket) at this folder so no root-owned path is needed.
-sed -i -E "s|^(temp_dir:).*|\1 ${ROOT}/data/tmp|; s|^([[:space:]]*log_dir:).*|\1 ${ROOT}/data/logs|" config.yaml
+sed -i -E "s|^(temp_dir:).*|\1 ${ROOT}/data/tmp|; s|^([[:space:]]*log_dir:).*|\1 ${ROOT}/data/logs|; s|^([[:space:]]*status_file:).*|\1 ${ROOT}/data/run/status.json|; s|^([[:space:]]*admin_socket:).*|\1 ${ROOT}/data/run/admin.sock|" config.yaml
 if [[ ! -f .env ]]; then
     if sudo test -f /etc/idcam/environment; then
         sudo cat /etc/idcam/environment > .env
