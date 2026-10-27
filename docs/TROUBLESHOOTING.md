@@ -163,3 +163,23 @@ If you ran `idcam` from a login shell as a normal user, that is expected to fail
 
 The service is supposed to refuse to start until `device_id` and `server.url` are real.
 That is not a permissions bug.
+
+## A passport or other small document is not detected
+
+Passports (125 x 88 mm) and similar documents fill only a few percent of the frame, and covers are
+often dark on a dark desk.
+
+* **Size.** The detector accepts a page from `detection.geometry_min_area_fraction` (default 0.02 =
+  2 % of the preview frame; it was 0.05 before and rejected passports that fill 3-5 %). A page under
+  ~1.5 % is too small to focus and capture well: lower the camera or raise the document.
+* **Colour contrast.** Detection also segments by *colour* difference from the desk (a dark blue or
+  burgundy cover on a dark desk differs in hue but hardly in brightness). In synthetic tests a
+  passport-sized page was found 163 times out of 216 versus 90 of 216 before (the remainder are the
+  sizes below 2 % and a beige page on a white desk, which have almost no colour difference).
+* **Check the log.** `event=idle_no_document ... reason=low_geometry_confidence_0.31` shows how
+  close it was: the document must reach `detection.min_geometry_confidence` (0.42). Open
+  `http://<ip>:8088/preview/live` to see the outline the detector draws.
+* **Light.** The LED strip is off until the capture is done, so the room light must be enough;
+  a very dim scene lowers edge contrast. A matt, non-reflective surface under the document helps.
+* The detected box is also used to crop the uploaded image; boxes under 1 % of the frame are not
+  cropped (the whole frame is sent).

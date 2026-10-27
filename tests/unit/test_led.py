@@ -82,27 +82,19 @@ def test_every_state_has_a_pattern():
 
 
 @pytest.mark.parametrize("state", STARTUP_STATES)
-def test_startup_is_blue_pulsing(state):
-    pattern = STATE_PATTERNS[state]
-    assert pattern.color == BLUE
-    assert pattern.mode == "pulse"
-    colors = _sample(pattern)
-    assert all(c[0] == 0 and c[1] == 0 and c[2] > 0 for c in colors)
-    assert len(colors) > 2
+def test_startup_is_off(state):
+    assert _sample(STATE_PATTERNS[state]) == {OFF}
 
 
-def test_ready_is_solid_white():
-    pattern = STATE_PATTERNS[AppState.IDLE]
-    assert pattern.mode == "solid"
-    assert _sample(pattern) == {WHITE}
+def test_ready_is_off():
+    assert _sample(STATE_PATTERNS[AppState.IDLE]) == {OFF}
 
 
 @pytest.mark.parametrize("state", CAPTURE_STATES)
-def test_capture_states_are_solid_white(state):
+def test_detection_focus_and_capture_are_off(state):
     pattern = STATE_PATTERNS[state]
     assert pattern.mode == "solid"
-    assert _sample(pattern) == {WHITE}
-    assert YELLOW not in _sample(pattern)
+    assert _sample(pattern) == {OFF}
 
 
 @pytest.mark.parametrize("state", PROCESSING_STATES)
@@ -140,12 +132,12 @@ def test_shutdown_is_off():
     assert _sample(STATE_PATTERNS[AppState.SHUTDOWN]) == {OFF}
 
 
-def test_ready_to_capture_keeps_white_without_restarting_pattern():
+def test_ready_to_capture_stays_dark_without_restarting_pattern():
     indicator = _indicator()
     indicator.set_state(AppState.IDLE)
     for state in CAPTURE_STATES:
         indicator.set_state(state)
-        assert indicator.current_color() == WHITE
+        assert indicator.current_color() == OFF
 
 
 # --- failure flash -----------------------------------------------------------
@@ -159,7 +151,7 @@ def test_failure_is_red_for_two_seconds_then_current_state():
     indicator.flash_failure()
     assert indicator.current_color(now + 0.1) == RED
     assert indicator.current_color(now + 1.9) == RED
-    assert indicator.current_color(now + 2.1) == WHITE
+    assert indicator.current_color(now + 2.1) == OFF
 
 
 def test_state_change_during_flash_is_shown_after_flash():
@@ -179,12 +171,12 @@ def test_flash_does_not_linger_after_expiry():
     indicator.set_state(AppState.IDLE)
     now = time.monotonic()
     indicator.flash_failure()
-    assert indicator.current_color(now + 0.5) == WHITE
+    assert indicator.current_color(now + 0.5) == OFF
     indicator.set_state(AppState.ERROR)
     # A later state uses its own pattern; the expired flash never comes back.
     assert indicator.current_color(now + 0.6) in {RED, OFF}
     indicator.set_state(AppState.IDLE)
-    assert indicator.current_color(now + 0.7) == WHITE
+    assert indicator.current_color(now + 0.7) == OFF
 
 
 def test_shutdown_cancels_flash():
@@ -204,7 +196,7 @@ def test_state_changes_reach_the_strip_and_stop_turns_it_off():
     indicator.start()
     try:
         indicator.set_state(AppState.IDLE)
-        assert _wait_for(lambda: backend.shown and backend.shown[-1] == WHITE)
+        assert _wait_for(lambda: backend.shown and backend.shown[-1] == OFF)  # ready: strip dark
         indicator.set_state(AppState.WAITING_FOR_REMOVAL)
         assert _wait_for(lambda: backend.shown[-1] == GREEN)
     finally:
@@ -234,10 +226,10 @@ def test_flash_then_restore_on_strip():
     indicator.start()
     try:
         indicator.set_state(AppState.IDLE)
-        assert _wait_for(lambda: backend.shown and backend.shown[-1] == WHITE)
+        assert _wait_for(lambda: backend.shown and backend.shown[-1] == OFF)
         indicator.flash_failure()
         assert _wait_for(lambda: backend.shown[-1] == RED)
-        assert _wait_for(lambda: backend.shown[-1] == WHITE)
+        assert _wait_for(lambda: backend.shown[-1] == OFF)
     finally:
         indicator.stop()
 
@@ -325,7 +317,7 @@ def test_orchestrator_transitions_drive_led(orch):
     orch._transition(AppState.DOCUMENT_DETECTED)
     orch._transition(AppState.FOCUSING)
     orch._transition(AppState.CAPTURING)
-    assert orch.led.current_color() == WHITE
+    assert orch.led.current_color() == OFF
     orch._transition(AppState.IMAGE_VALIDATION)
     assert orch.led.pattern is STATE_PATTERNS[AppState.UPLOADING]
 
@@ -339,7 +331,7 @@ async def test_orchestrator_failure_flashes_red_then_restores(orch):
     await orch._fail_transaction_and_wait("focus_failed", "soft")
     assert orch.sm.state == AppState.IDLE
     assert orch.led.current_color(now + 0.5) == RED
-    assert orch.led.current_color(now + 2.5) == WHITE
+    assert orch.led.current_color(now + 2.5) == OFF
 
 
 class TestGuidanceColours:
@@ -350,12 +342,11 @@ class TestGuidanceColours:
 
     def test_every_phase_has_a_distinct_meaning(self):
         table, extras = led_mod.build_patterns(LedConfig())
-        assert table[AppState.IDLE].color == WHITE  # place a document
-        assert table[AppState.FOCUSING].color == WHITE  # hold still, lit for the camera
+        assert table[AppState.IDLE].color == OFF  # ready for a document: dark
+        assert table[AppState.FOCUSING].color == OFF  # detect / focus / capture: dark
         assert table[AppState.UPLOADING].color == BLUE  # captured: wait
         assert table[AppState.WAITING_FOR_REMOVAL].color == GREEN  # done: remove the document
         assert table[AppState.WAITING_FOR_REMOVAL].mode == "blink"
-        assert table[AppState.IDLE].mode == "solid"  # steady white = ready; blinking white = remove
         assert extras["remove"].mode == "blink"  # failed: blinking white, unlike the steady ready white
 
     def test_colours_can_be_overridden_per_status_without_touching_the_blink_style(self):
@@ -372,10 +363,19 @@ class TestGuidanceColours:
         with pytest.raises(ValueError, match="0-255"):
             LedConfig(colors={"success": (0, 300, 0)})
 
-    def test_working_phase_can_use_its_own_colour(self):
-        table, _ = led_mod.build_patterns(LedConfig(illuminate_during_capture=False))
-        assert table[AppState.FOCUSING].color == led_mod.CYAN
-        assert table[AppState.IDLE].color == WHITE
+    def test_dark_statuses_can_be_switched_on_with_colors(self):
+        cfg = LedConfig(colors={"ready": (255, 255, 255), "working": (0, 200, 255), "starting": (0, 0, 255)})
+        table, _ = led_mod.build_patterns(cfg)
+        assert table[AppState.IDLE].color == (255, 255, 255)
+        assert table[AppState.FOCUSING].color == (0, 200, 255)
+        assert table[AppState.CAPTURING].color == (0, 200, 255)
+        assert table[AppState.BOOT].color == (0, 0, 255)
+        assert table[AppState.UPLOADING].color == BLUE  # untouched
+
+    def test_old_illuminate_setting_in_an_existing_config_is_ignored(self):
+        cfg = LedConfig.model_validate({"enabled": True, "illuminate_during_capture": True})
+        table, _ = led_mod.build_patterns(cfg)
+        assert table[AppState.FOCUSING].color == OFF
 
     def test_gpio_pin_is_configurable_and_validated(self):
         assert LedConfig().gpio_pin == 18
@@ -391,7 +391,7 @@ class TestGuidanceColours:
         off = led.current_color(now=led._hint_since + 0.6)
         assert on == WHITE and off == OFF
         led.set_state(AppState.DOCUMENT_DETECTED)
-        assert led.current_color(now=time.monotonic()) == WHITE
+        assert led.current_color(now=time.monotonic()) == OFF
 
     def test_failure_flash_wins_over_the_hint(self):
         led = LedIndicator(LedConfig(enabled=True), backend=FakeBackend())
@@ -460,9 +460,9 @@ def test_indicator_thread_restarts_a_late_strip_without_a_colour_change(tmp_path
     backend, log = _worker_backend(tmp_path, script)
     indicator = LedIndicator(LedConfig(enabled=True), backend=backend)
     indicator.start()
-    indicator.set_state(AppState.IDLE)  # white, then nothing changes for the rest of the test
+    indicator.set_state(AppState.SUCCESS)  # solid green, then nothing changes for the rest of the test
     try:
-        assert _wait_for(lambda: log.exists() and "255 255 255" in log.read_text(), 5.0)
+        assert _wait_for(lambda: log.exists() and "0 255 0" in log.read_text(), 5.0)
     finally:
         indicator.stop()
 

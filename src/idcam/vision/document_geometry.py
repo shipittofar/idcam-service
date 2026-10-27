@@ -128,7 +128,9 @@ def _odd(value: float, minimum: int) -> int:
     return n if n % 2 else n + 1
 
 
-def _binary_variants(gray: np.ndarray, scale: float = 1.0) -> list[tuple[str, np.ndarray]]:
+def _binary_variants(
+    gray: np.ndarray, scale: float = 1.0, lab: np.ndarray | None = None
+) -> list[tuple[str, np.ndarray]]:
     """Multiple segmentation strategies for uneven lighting and weak edges.
 
     ``scale`` is the downscale factor applied to the frame (1.0 = untouched): structuring
@@ -168,6 +170,21 @@ def _binary_variants(gray: np.ndarray, scale: float = 1.0) -> list[tuple[str, np
         _, mask = cv2.threshold(diff, 0, 255, tflag + cv2.THRESH_OTSU)
         variants.append((tag, _clean(mask, k15)))
 
+    if lab is not None and _USE_COLOR:
+        # Colour distance from the surrounding background: a dark blue passport cover on a dark
+        # desk (or a beige page on a white desk) has almost no luminance contrast but a clear hue
+        # difference, which the grey-level variants cannot see.
+        small_lab = cv2.resize(lab, (max(1, w // ds), max(1, h // ds)), interpolation=cv2.INTER_AREA)
+        small_lab = cv2.GaussianBlur(small_lab, (0, 0), sigmaX=sigma_bg / ds, sigmaY=sigma_bg / ds)
+        bg_lab = cv2.resize(small_lab, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        delta = lab.astype(np.float32) - bg_lab
+        delta[..., 0] *= 100.0 / 255.0  # 8-bit L (0..255) -> L* units, like a and b
+        dist = cv2.GaussianBlur(np.sqrt((delta**2).sum(axis=2)), (0, 0), 1.2)
+        if float(dist.max()) - float(dist.min()) >= _MIN_COLOR_RANGE:
+            dist8 = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            _, mask = cv2.threshold(dist8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            variants.append(("lab_bg_otsu", _clean(mask, k15)))
+
     for tag, tflag in (("otsu", cv2.THRESH_BINARY), ("otsu_inv", cv2.THRESH_BINARY_INV)):
         _, mask = cv2.threshold(blur, 0, 255, tflag + cv2.THRESH_OTSU)
         variants.append((tag, _clean(mask, k9)))
@@ -188,8 +205,38 @@ def _binary_variants(gray: np.ndarray, scale: float = 1.0) -> list[tuple[str, np
     return variants
 
 
-def _contrast_score(gray: np.ndarray, bbox: tuple[int, int, int, int]) -> float:
+def _color_contrast(lab: np.ndarray, bbox: tuple[int, int, int, int]) -> float:
+    """Colour difference (Lab, ~0..1) between the region and a ring around it."""
+    h, w = lab.shape[:2]
+    x, y, rw, rh = clip_roi(bbox, (h, w))
+    if rw < 4 or rh < 4:
+        return 0.0
+    pad = max(4, int(min(rw, rh) * 0.08))
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(w, x + rw + pad), min(h, y + rh + pad)
+    n_window = (x1 - x0) * (y1 - y0)
+    n_inner = rw * rh
+    if n_window - n_inner < 16:
+        return 0.0
+    # means via cv2 (C loops): the ring mean is (window sum - inner sum) / ring pixels
+    window_sum = np.array(cv2.mean(lab[y0:y1, x0:x1])[:3]) * n_window
+    inner_mean = np.array(cv2.mean(lab[y : y + rh, x : x + rw])[:3])
+    ring_mean = (window_sum - inner_mean * n_inner) / (n_window - n_inner)
+    delta = inner_mean - ring_mean
+    delta[0] *= 100.0 / 255.0
+    return float(np.sqrt((delta**2).sum())) / 100.0
+
+
+def _contrast_score(gray: np.ndarray, bbox: tuple[int, int, int, int], lab: np.ndarray | None = None) -> float:
     """How much the region differs from its immediate surroundings (paper vs desk)."""
+    luminance = _luminance_contrast(gray, bbox)
+    # Colour only matters when luminance is weak: the confidence term saturates at 0.12.
+    if lab is not None and _USE_COLOR and luminance < 0.12:
+        return max(luminance, _color_contrast(lab, bbox))
+    return luminance
+
+
+def _luminance_contrast(gray: np.ndarray, bbox: tuple[int, int, int, int]) -> float:
     h, w = gray.shape
     x, y, rw, rh = clip_roi(bbox, (h, w))
     if rw < 4 or rh < 4:
@@ -275,6 +322,7 @@ def _score_geometry(
     min_rectangularity: float,
     min_contrast: float,
     edge_maps: tuple[np.ndarray, np.ndarray] | None = None,
+    lab: np.ndarray | None = None,
 ) -> tuple[DocumentGeometry | None, GeometryCandidateDiag]:
     h, w = int(frame_shape[0]), int(frame_shape[1])
     frame_area = float(w * h)
@@ -284,7 +332,7 @@ def _score_geometry(
     aspect = float(bw) / max(float(bh), 1.0)
     rectangularity = contour_area / max(float(bw * bh), 1.0)
     edge_strength = _edge_strength_in_region(gray, bbox)
-    contrast = _contrast_score(gray, bbox)
+    contrast = _contrast_score(gray, bbox, lab)
 
     def _reject(reason: str) -> tuple[None, GeometryCandidateDiag]:
         return None, GeometryCandidateDiag(
@@ -325,7 +373,7 @@ def _score_geometry(
         1.0,
         max(
             0.0,
-            0.28 * min(1.0, area_fraction / 0.20)
+            0.28 * min(1.0, area_fraction / _AREA_SATURATION)
             + 0.22 * min(1.0, rectangularity)
             + 0.18 * min(1.0, contrast / 0.12)
             + 0.12 * min(1.0, edge_strength / 60.0)
@@ -398,6 +446,7 @@ def _collect_from_mask(
     min_rectangularity: float,
     min_contrast: float,
     edge_maps: tuple[np.ndarray, np.ndarray] | None = None,
+    lab: np.ndarray | None = None,
 ) -> tuple[list[tuple[DocumentGeometry, GeometryCandidateDiag]], list[GeometryCandidateDiag]]:
     h, w = frame_shape[:2]
     frame_area = float(w * h)
@@ -445,6 +494,7 @@ def _collect_from_mask(
             min_rectangularity=min_rectangularity,
             min_contrast=min_contrast,
             edge_maps=edge_maps,
+            lab=lab,
         )
         reports.append(diag)
         if geom is not None:
@@ -454,6 +504,14 @@ def _collect_from_mask(
 
 
 _DETECT_MAX_DIM = 640
+# Document area (fraction of the frame) at which the area term of the confidence saturates.
+_AREA_SATURATION = 0.20
+_USE_COLOR = True
+# Colour-distance segmentation needs this much spread in the distance map, else the image is a
+# uniform surface and Otsu would only split noise.
+_MIN_COLOR_RANGE = 12.0
+# Weight of Lab a/b gradients relative to the grey-level gradient (grey is CLAHE-stretched).
+_COLOR_EDGE_GAIN = 2.0
 _ALIGN_WINDOW = 15  # px at working resolution: search radius for the true edge next to the outline
 _ALIGN_FLOOR = 0.35  # confidence multiplier for an outline that is nowhere on an edge
 
@@ -486,7 +544,7 @@ def _rescale_geometry(geom: DocumentGeometry, factor: float, frame_shape: tuple[
 def _detect_all(
     frame: np.ndarray,
     *,
-    min_area_fraction: float = 0.03,
+    min_area_fraction: float = 0.02,
     max_area_fraction: float = 0.90,
     min_rectangularity: float = 0.42,
     min_contrast: float = 0.018,
@@ -507,9 +565,17 @@ def _detect_all(
     scale = ratio  # kernels shrink only by the factor the frame was shrunk
 
     gray = _prepare_gray(work)
+    lab = cv2.cvtColor(work, cv2.COLOR_RGB2LAB) if (work.ndim == 3 and work.shape[2] == 3 and _USE_COLOR) else None
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     grad = cv2.magnitude(gx, gy)
+    if lab is not None:
+        # Edges between regions of equal brightness but different colour count as edges too.
+        lab_f = cv2.GaussianBlur(lab, (3, 3), 0).astype(np.float32)
+        lab_f[..., 0] *= 100.0 / 255.0
+        cx = np.stack([cv2.Sobel(lab_f[..., i], cv2.CV_32F, 1, 0, ksize=3) for i in (1, 2)], axis=0)
+        cy = np.stack([cv2.Sobel(lab_f[..., i], cv2.CV_32F, 0, 1, ksize=3) for i in (1, 2)], axis=0)
+        grad = np.maximum(grad, np.sqrt((cx**2 + cy**2).sum(axis=0)) * _COLOR_EDGE_GAIN)
     edge_maps = (
         cv2.dilate(grad, np.ones((3, 3), np.uint8)),
         cv2.dilate(grad, np.ones((_ALIGN_WINDOW, _ALIGN_WINDOW), np.uint8)),
@@ -517,7 +583,7 @@ def _detect_all(
     all_geoms: list[DocumentGeometry] = []
     all_reports: list[GeometryCandidateDiag] = []
 
-    for method, mask in _binary_variants(gray, scale):
+    for method, mask in _binary_variants(gray, scale, lab):
         geoms, reports = _collect_from_mask(
             mask,
             gray,
@@ -528,6 +594,7 @@ def _detect_all(
             min_rectangularity=min_rectangularity,
             min_contrast=min_contrast,
             edge_maps=edge_maps,
+            lab=lab,
         )
         all_reports.extend(reports)
         if geoms:
@@ -552,7 +619,7 @@ def _detect_all(
 def detect_document_geometry(
     frame: np.ndarray,
     *,
-    min_area_fraction: float = 0.03,
+    min_area_fraction: float = 0.02,
     max_area_fraction: float = 0.90,
     min_rectangularity: float = 0.42,
     min_edge_strength: float = 8.0,  # kept for API compat; contrast path used internally
@@ -573,7 +640,7 @@ def detect_document_geometry(
 def scan_document_candidates(
     frame: np.ndarray,
     *,
-    min_area_fraction: float = 0.03,
+    min_area_fraction: float = 0.02,
     max_area_fraction: float = 0.90,
     min_rectangularity: float = 0.42,
     min_edge_strength: float = 8.0,

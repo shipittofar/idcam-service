@@ -205,8 +205,7 @@ idCam logs `event=led_unavailable` and carries on.
 
 | Colour | Meaning (what to do) |
 |--------|----------------------|
-| Blue, pulsing | Starting up / initializing camera — wait |
-| White | Ready — place a document; stays white through detection, focusing and capture (hold it still) |
+| Off | Starting up, ready for a document, and while it is detected, focused and captured |
 | Blue, blinking | Captured; validating and uploading — wait |
 | Green | Uploaded (a moment) |
 | Green, blinking | Done — remove the document |
@@ -242,12 +241,9 @@ LEDs, and `led.colors` overrides the colour of any status as `[R, G, B]`
 `scripts/setup_local.sh` installs the LED libraries, adds your user to the `gpio` group and turns
 the strip on in `config.yaml`; pass `--no-led` to skip it.
 
-If the strip lights the capture area, the colour change between states also
-changes the scene the detector sees. The strip therefore stays the same white
-from "ready" through detection, autofocus and the still capture; it changes
-only after the capture (blue for upload, green when done). Lower
-`led.brightness` or aim the strip away from the document if removal detection
-becomes unreliable.
+The strip is dark for everything up to the capture, so it never changes the light on the
+document the camera focuses and exposes; it only lights up afterwards (blue while uploading,
+green when done).
 
 ## User Status
 

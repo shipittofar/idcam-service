@@ -29,7 +29,6 @@ Color = tuple[int, int, int]
 OFF: Color = (0, 0, 0)
 WHITE: Color = (255, 255, 255)
 YELLOW: Color = (255, 255, 0)
-CYAN: Color = (0, 200, 255)
 BLUE: Color = (0, 0, 255)
 GREEN: Color = (0, 255, 0)
 RED: Color = (255, 0, 0)
@@ -57,24 +56,21 @@ class LedPattern:
         return self.color
 
 
-STARTING = LedPattern(BLUE, "pulse", 2.0)
-READY = LedPattern(WHITE)
-# Detection through capture reuses the ready pattern itself, so the strip
-# stays the same steady white from IDLE through autofocus and the still
-# capture and the light on the document never changes mid-capture.
-DOCUMENT = READY
+# The strip is dark while starting, while waiting for a document and while a document is being
+# detected, stabilised, focused and captured: it only speaks once there is something for the
+# user to do or to wait for (processing, done, remove, failure, recovering, error). A status can
+# still be switched on with led.colors, e.g. {"ready": [255, 255, 255]}.
+STARTING = DARK = LedPattern(OFF)
+READY = DOCUMENT = DARK
 PROCESSING = LedPattern(BLUE, "blink", 0.6)
 DONE = LedPattern(GREEN)
 # Uploaded and waiting for the document to be taken away: green blinking.
 REMOVAL_WAIT = LedPattern(GREEN, "blink", 0.8)
 RECOVERING = LedPattern(YELLOW, "blink", 1.0)
 FAULT = LedPattern(RED, "blink", 1.0)
-DARK = LedPattern(OFF)
 FAILURE_FLASH = LedPattern(RED)
 # Failed repeatedly and the document is still there: take it away, then place it again.
 REMOVE_HINT = LedPattern(WHITE, "blink", 0.8)
-# "working" colour when illuminate_during_capture is off.
-WORKING_COLORED = LedPattern(CYAN, "pulse", 1.5)
 
 STATE_PATTERNS: dict[AppState, LedPattern] = {
     AppState.BOOT: STARTING,
@@ -128,11 +124,10 @@ def build_patterns(config: LedConfig) -> tuple[dict[AppState, LedPattern], dict[
     """
     colors = {name: tuple(rgb) for name, rgb in config.colors.items()}
     table = dict(STATE_PATTERNS)
-    working = READY if config.illuminate_during_capture else WORKING_COLORED
     groups = {
         "starting": (_STARTUP_STATES, STARTING),
         "ready": ((AppState.IDLE,), READY),
-        "working": (_WORKING_STATES, working),
+        "working": (_WORKING_STATES, DOCUMENT),
         "processing": (_PROCESSING_STATES, PROCESSING),
         "success": ((AppState.SUCCESS,), DONE),
         # same colour as "success", blinking, while the user is asked to take the document away
@@ -144,10 +139,6 @@ def build_patterns(config: LedConfig) -> tuple[dict[AppState, LedPattern], dict[
         pattern = _recolor(base, colors.get("success" if name == "success_wait" else name))
         for state in states:
             table[state] = pattern
-    # "working" follows "ready" when it is meant to be the same light on the document.
-    if config.illuminate_during_capture and "working" not in colors:
-        for state in _WORKING_STATES:
-            table[state] = table[AppState.IDLE]
     extras = {
         "remove": _recolor(REMOVE_HINT, colors.get("remove")),
         "failure": _recolor(FAILURE_FLASH, colors.get("failure")),

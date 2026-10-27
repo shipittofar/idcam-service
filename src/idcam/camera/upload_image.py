@@ -31,8 +31,10 @@ def _crop_box(
         return None
     width, height = size
     x, y, w, h = (int(v) for v in roi)
-    if w <= 0 or h <= 0 or w * h < 0.03 * width * height:
-        return None  # not a plausible document box: keep the whole frame rather than cut it
+    # Passport-size pages are ~2-4 % of the frame (the detector's minimum is 2 %); anything under
+    # 1 % is not a document box, so keep the whole frame rather than cut it.
+    if w <= 0 or h <= 0 or w * h < 0.01 * width * height:
+        return None
     pad_x, pad_y = int(w * margin), int(h * margin)
     left, top = max(0, x - pad_x), max(0, y - pad_y)
     right, bottom = min(width, x + w + pad_x), min(height, y + h + pad_y)

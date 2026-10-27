@@ -84,13 +84,13 @@ def main():
 
     # (meaning, colour, blinking)
     colors = [
-        ("White          = ready: place the document (also lights it while it is captured)", (255, 255, 255), False),
         ("Blue blinking  = captured: checking and uploading, wait", (0, 0, 255), True),
         ("Green          = uploaded (for a moment)", (0, 255, 0), False),
         ("Green blinking = done: remove the document", (0, 255, 0), True),
         ("White blinking = failed again: remove the document, then place it again", (255, 255, 255), True),
         ("Red            = capture or upload failed (short flash) / error (blinking)", (255, 0, 0), False),
         ("Yellow blinking = recovering", (255, 255, 0), True),
+        ("Off            = starting / ready / detecting / focusing / capturing", (0, 0, 0), False),
     ]
 
     try:

@@ -62,3 +62,15 @@ class TestPrepareUploadImage:
         gray = cv2.cvtColor(cv2.imread(str(out.path)), cv2.COLOR_BGR2GRAY)
         # text strokes (dark) and paper (bright) are both still present
         assert (gray < 90).mean() > 0.01 and (gray > 200).mean() > 0.3
+
+
+class TestSmallDocumentCrop:
+    def test_passport_sized_box_is_cropped_not_sent_as_the_whole_frame(self, capture, tmp_path):
+        # ~2.4 % of the 5800x4400 frame
+        out = prepare_upload_image(capture, tmp_path / "up.jpg", (2000, 1500, 780, 780), UploadImageConfig())
+        assert out.cropped
+        assert out.width < 1200
+
+    def test_box_under_one_percent_still_keeps_the_whole_frame(self, capture, tmp_path):
+        out = prepare_upload_image(capture, tmp_path / "up.jpg", (2000, 1500, 300, 300), UploadImageConfig())
+        assert not out.cropped

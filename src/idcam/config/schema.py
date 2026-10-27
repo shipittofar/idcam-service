@@ -135,7 +135,7 @@ class DetectionConfig(BaseModel):
     removal_motion_factor: float = Field(0.5, gt=0, le=1.0)
     removal_edge_factor: float = Field(0.5, gt=0, le=2.0)
     min_geometry_confidence: float = Field(0.42, gt=0, le=1.0)
-    geometry_min_area_fraction: float = Field(0.05, gt=0, le=1.0)
+    geometry_min_area_fraction: float = Field(0.02, gt=0, le=1.0)  # passport-size page at 3% of the frame
     geometry_max_area_fraction: float = Field(0.85, gt=0, le=1.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)
 
@@ -263,11 +263,8 @@ class LedConfig(BaseModel):
     brightness: float = Field(0.2, ge=0.0, le=1.0)
     byteorder: Literal["GRB", "RGB", "GRBW", "RGBW"] = "GRB"
     failure_flash_sec: float = Field(2.0, ge=0.0, le=30.0)
-    # The strip lights the document, so it stays white from "ready" through the capture (a colour
-    # change there changes exposure and what the detector sees). Set false to use a colour for
-    # the "working" phase instead.
-    illuminate_during_capture: bool = True
     # Per-status colour overrides as [R, G, B], e.g. {"success": [0, 255, 0], "remove": [255, 80, 0]}.
+    # starting / ready / working are dark by default; give them a colour to switch them on.
     colors: dict[str, tuple[int, int, int]] = Field(default_factory=dict)
 
     @field_validator("colors")
