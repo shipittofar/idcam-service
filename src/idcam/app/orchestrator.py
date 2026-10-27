@@ -16,6 +16,7 @@ from idcam.app.transaction import ActiveCaptureTransaction, TransactionPhase
 from idcam.camera.autofocus import AutofocusController
 from idcam.camera.capture import CaptureService
 from idcam.camera.manager import CameraManager
+from idcam.camera.manual_focus import ManualFocusStore, valid_lens
 from idcam.camera.quality import ImageValidator
 from idcam.camera.upload_image import prepare_upload_image
 from idcam.config.schema import AppConfig
@@ -86,6 +87,11 @@ class ApplicationOrchestrator:
         self.status = StatusPublisher(config.ui.status_file, version=__version__)
         self.camera = CameraManager(config.camera, use_mock=use_mock_camera)
         self.autofocus = AutofocusController(config.camera, config.quality)
+        # Manual focus (camera.focus_mode: manual): autofocus off, lens value set in the debug panel.
+        self._manual_focus = config.camera.focus_mode == "manual"
+        self.manual_focus_store = ManualFocusStore(
+            config.camera.manual_focus_file or (config.temp_dir.parent / "manual_focus.json")
+        )
         self.temp_store = TempFileStore(config.temp_dir)
         self.capture_service = CaptureService(config.camera, self.temp_store)
         self.validator = ImageValidator(config.quality, config.camera)
@@ -145,6 +151,7 @@ class ApplicationOrchestrator:
         if config.debug.enabled:
             self._debug_viewer = LiveDebugViewer(config.debug)
             self._debug_viewer.set_capture_handler(self.request_manual_capture)
+            self._debug_viewer.set_focus_handlers(self.focus_status, self.set_manual_focus)
 
     @property
     def has_active_transaction(self) -> bool:
@@ -210,6 +217,8 @@ class ApplicationOrchestrator:
             details={"configured": True, "reachable": network_ok},
         )
 
+        if self._manual_focus:
+            self._load_manual_focus()
         self._transition(AppState.CAMERA_INITIALIZING)
         try:
             await asyncio.to_thread(self.camera.initialize)
@@ -503,6 +512,67 @@ class ApplicationOrchestrator:
         set_log_context(capture_id=txn.capture_id)
         logger.info("event=transaction_started capture_id=%s trigger=%s", txn.capture_id, trigger)
         return txn
+
+    # -- manual focus (HTTP-thread entry points used by the debug panel) --------------------------
+
+    def _load_manual_focus(self) -> None:
+        """Use the confirmed lens position from the last session, else camera.manual_lens_position."""
+        saved = self.manual_focus_store.load()
+        lens = saved if saved is not None else float(self.config.camera.manual_lens_position)
+        self.camera.set_manual_lens(lens)
+        logger.info(
+            "event=manual_focus_active lens=%.3f source=%s file=%s autofocus=disabled",
+            lens,
+            "saved" if saved is not None else "config",
+            self.manual_focus_store.path,
+        )
+        if not self.config.debug.enabled:
+            logger.warning(
+                "event=manual_focus_no_panel hint=set debug.enabled: true to change the focus from the panel"
+            )
+
+    def _focus_busy(self) -> bool:
+        txn_active = self._transaction is not None and not self._transaction.is_terminal
+        return (
+            self.sm.state not in {AppState.IDLE, AppState.WAITING_FOR_REMOVAL}
+            or self.has_active_transaction
+            or txn_active
+        )
+
+    def focus_status(self) -> dict:
+        """Focus mode and values for the panel (safe to call from any thread)."""
+        if not self._manual_focus:
+            return {"mode": "auto"}
+        lo, hi = self.camera.lens_position_range()
+        return {
+            "mode": "manual",
+            "lens_position": self.camera.get_manual_lens(),
+            "saved_lens": self.manual_focus_store.load(),
+            "range": [lo, hi],
+            "busy": self._focus_busy(),
+        }
+
+    def set_manual_focus(self, lens: object, save: bool = False) -> dict:
+        """Move the lens to ``lens`` (live preview); with ``save`` also keep it for all later captures."""
+        if not self._manual_focus:
+            return {"ok": False, "status": "disabled", "message": "Manual focus is off (camera.focus_mode is auto)"}
+        value = valid_lens(lens)
+        if value is None:
+            return {"ok": False, "status": "invalid", "message": "Lens position must be a number from 0 to 32"}
+        if self._focus_busy():
+            return {"ok": False, "status": "busy", "message": "A capture is running; change the focus when it is done"}
+        try:
+            value = self.camera.set_manual_lens(value)
+        except CameraError as exc:
+            return {"ok": False, "status": "error", "message": str(exc)}
+        if not save:
+            return {"ok": True, "status": "applied", "lens_position": value}
+        try:
+            self.manual_focus_store.save(value)
+        except (OSError, ValueError) as exc:
+            logger.error("event=manual_focus_save_failed error=%s", exc)
+            return {"ok": False, "status": "save_failed", "lens_position": value, "message": f"Could not save: {exc}"}
+        return {"ok": True, "status": "saved", "lens_position": value, "saved_lens": value}
 
     def request_manual_capture(self, timeout: float = 180.0) -> dict:
         """HTTP-thread entry: queue a capture through the existing state machine."""

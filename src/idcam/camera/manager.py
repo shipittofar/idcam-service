@@ -155,6 +155,10 @@ class CameraManager:
         # Lens position we last commanded manually. capture_metadata() lags the command, so the
         # still must use this value, not a metadata read (logs: still at 8.38 after parking at 8.17).
         self._held_lens: float | None = None
+        # Manual focus mode: the lens is driven to this value and never auto-focused.
+        self._manual_lens: float | None = (
+            float(config.manual_lens_position) if getattr(config, "focus_mode", "auto") == "manual" else None
+        )
         # LensPosition reported in the metadata of the last frame from capture_fresh_preview_array.
         self.last_fresh_lens: float | None = None
         # Exposure details of that frame (None entries = the metadata field was not reported).
@@ -546,7 +550,7 @@ class CameraManager:
     def lens_position_range(self) -> tuple[float, float]:
         """Advertised LensPosition range in dioptres (0 = infinity)."""
         if self._use_mock or self._picam2 is None:
-            return (0.0, 10.0)
+            return (0.0, 32.0)  # same as the real Arducam 64MP range
         info = self._picam2.camera_controls.get("LensPosition")
         try:
             return (float(info[0]), float(info[1]))
@@ -635,9 +639,45 @@ class CameraManager:
         except (TypeError, ValueError):
             return None
 
+    # -- manual focus ---------------------------------------------------------------------------
+
+    @property
+    def is_manual_focus(self) -> bool:
+        return self._manual_lens is not None
+
+    def get_manual_lens(self) -> float | None:
+        with self._lock:
+            return self._manual_lens
+
+    def set_manual_lens(self, position: float) -> float:
+        """Set (and apply right away) the manual lens position; returns the value used."""
+        lo, hi = self.lens_position_range()
+        value = float(position)
+        if not lo <= value <= hi:
+            raise CameraError(f"Manual lens position {value:.2f} outside {lo:.1f}..{hi:.1f}")
+        with self._lock:
+            self._manual_lens = value
+            self._held_lens = value
+            if self._started and not self._use_mock and self._picam2 is not None:
+                self._set_controls_unlocked({"AfMode": self._af_mode_manual(), "LensPosition": value})
+        logger.info("event=manual_lens_set lens=%.3f", value)
+        return value
+
+    def _apply_manual_lens(self) -> None:
+        """Park the lens on the manual value (instead of starting autofocus)."""
+        if self._manual_lens is None or self._picam2 is None:
+            return
+        self._set_controls_unlocked({"AfMode": self._af_mode_manual(), "LensPosition": float(self._manual_lens)})
+        self._held_lens = float(self._manual_lens)
+        self._preview_af_mode = "Manual"
+        logger.info("event=autofocus_disabled mode=manual lens=%.3f", self._manual_lens)
+
     def _enable_preview_autofocus(self, *, wait: bool = True) -> None:
         """Start real AF on the preview stream (Continuous, else one-shot Auto)."""
         if self._use_mock or self._picam2 is None:
+            return
+        if self._manual_lens is not None:
+            self._apply_manual_lens()
             return
         advertised = self._picam2.camera_controls
         if "AfMode" not in advertised:

@@ -203,6 +203,11 @@ class AutofocusController:
             lens_before,
         )
 
+        if self.config.focus_mode == "manual":
+            return await self._run_manual_focus(
+                camera, roi, sensor, preview_size, before, floor, lens_before, t_start, t_prep
+            )
+
         refine_ok = self._refine_available(camera)
 
         # Fast path: same setup as the last validated capture, so start the lens search there and
@@ -314,6 +319,55 @@ class AutofocusController:
         raise AutofocusError(
             f"Autofocus did not improve: before={before:.1f} after={after:.1f} "
             f"ratio={ratio:.2f} method={method} preview_roi={_fmt_roi(roi)}"
+        )
+
+    async def _run_manual_focus(
+        self,
+        camera: FocusCapableCamera,
+        roi: tuple[int, int, int, int],
+        sensor: tuple[int, int, int, int],
+        preview_size: tuple[int, int],
+        before: float,
+        floor: float,
+        lens_before: Any,
+        t_start: float,
+        t_prep: float,
+    ) -> AutofocusResult:
+        """Manual focus mode: no autofocus at all; the lens goes to the confirmed manual value."""
+        getter = getattr(camera, "get_manual_lens", None)
+        setter = getattr(camera, "set_manual_lens", None) or getattr(camera, "set_lens_position", None)
+        lens = getter() if callable(getter) else None
+        if lens is None or not callable(setter):
+            raise AutofocusError("Manual focus mode is on but the camera has no manual lens position")
+        await asyncio.to_thread(setter, float(lens))
+        # Let the lens arrive, then measure a frame exposed after that (for the log / panel only).
+        await asyncio.sleep(float(self.config.af_refine_settle_sec))
+        fresh = getattr(camera, "capture_fresh_preview_array", None)
+        frame = await asyncio.to_thread(fresh if callable(fresh) else camera.capture_preview_array)
+        sharpness = float(preview_sharpness(frame, roi=roi))
+        if sharpness < floor:
+            # The operator chose this lens position: never block the capture on it, but say so.
+            logger.warning(
+                "event=manual_focus_soft sharpness=%.1f floor=%.1f lens=%.3f (adjust the focus in the panel)",
+                sharpness,
+                floor,
+                float(lens),
+            )
+        ratio = sharpness / before if before > 1e-6 else 1.0
+        self.debug.method = "manual"
+        self.debug.lens_after = float(lens)
+        self.debug.focus_after = sharpness
+        self.debug.improvement_ratio = round(ratio, 3)
+        logger.info(
+            "event=focus_manual lens=%.3f sharpness=%.1f prep_ms=%d total_ms=%d",
+            float(lens),
+            sharpness,
+            int((t_prep - t_start) * 1000),
+            int((time.monotonic() - t_start) * 1000),
+        )
+        logger.info("event=pipeline_stage stage=focus_verified method=manual sharpness=%.1f", sharpness)
+        return self._result(
+            True, sharpness, 0, "manual", floor, before, sharpness, ratio, roi, sensor, preview_size, lens_before, float(lens)
         )
 
     def _log_focus_timing(

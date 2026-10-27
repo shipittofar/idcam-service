@@ -190,6 +190,10 @@ hostname -I
 
 Then open `http://<PI-IP>:8088/preview/live` (MJPEG: `/preview/live.mjpg`, JSON: `/preview/status`). Auth tokens are never shown.
 
+### Manual focus mode
+
+Set `camera.focus_mode: manual` (and `debug.enabled: true`) to switch autofocus off. The panel then shows a **Manual focus** card: move the lens slider (0-32 dioptres) while watching the live image and the sharpness value, then press **Confirm & save**. The value is written to `manual_focus.json` (default: next to `temp_dir`, or `camera.manual_focus_file`) and used for every later capture and restart. Until a value is saved, `camera.manual_lens_position` is used. The panel endpoint (`/preview/focus`) is unauthenticated like the rest of the viewer, only works in manual mode, accepts JSON only and is refused while a capture is running. A soft image in manual mode is logged (`manual_focus_soft`) but never blocks the capture.
+
 ## Status LED strip (optional)
 
 A WS2812B strip on a Raspberry Pi 5 GPIO can show the device state. It is off

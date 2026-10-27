@@ -42,6 +42,11 @@ camera:
   capture_height: 6944
   jpeg_quality: 95
   preview_fps: 5
+  # Focus mode: "auto" (hardware AF + lens search) or "manual" (AF off; pick the lens in the debug panel
+  # at /preview/live, press "Confirm & save"; the value is stored in manual_focus.json and reused). Needs debug.enabled.
+  focus_mode: auto
+  manual_lens_position: 8.0      # used until a value is saved from the panel (0..32 dioptres)
+  # manual_focus_file: /var/lib/idcam/manual_focus.json   # default: next to temp_dir
   af_max_retries: 3
   af_timeout_sec: 10
   af_verify_max_retries: 2

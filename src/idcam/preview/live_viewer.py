@@ -298,6 +298,12 @@ _HTML_PAGE = """<!DOCTYPE html>
     .manual { margin-top: 8px; font-size: 0.9rem; color: #ddd; min-height: 2.4em; }
     .manual.error { color: #f87171; }
     .manual.ok { color: #4ade80; }
+    .focuscard { margin-top: 20px; padding: 12px; border: 1px solid #334155; border-radius: 8px; background: #161b22; }
+    .focuscard h2 { margin: 0 0 8px; font-size: 1rem; }
+    .focuscard .row { display: flex; gap: 8px; align-items: center; }
+    .focuscard input[type=range] { flex: 1; }
+    .focuscard input[type=number] { width: 84px; padding: 4px; background: #0d1117; color: #eee; border: 1px solid #334155; border-radius: 4px; }
+    .focuscard small { color: #94a3b8; }
     @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -322,6 +328,20 @@ _HTML_PAGE = """<!DOCTYPE html>
       </dl>
       <button id="capture" type="button">Capture &amp; Send</button>
       <div id="manual" class="manual">Idle</div>
+      <section id="focuscard" class="focuscard" hidden>
+        <h2>Manual focus</h2>
+        <div class="row">
+          <input id="lens_slider" type="range" min="0" max="32" step="0.05" value="8">
+          <input id="lens_num" type="number" min="0" max="32" step="0.05" value="8">
+        </div>
+        <small>Move the slider while watching the preview and the sharpness value; the highest sharpness is the best focus.</small>
+        <dl>
+          <dt>Sharpness now</dt><dd id="focus_sharp">—</dd>
+          <dt>Saved value</dt><dd id="focus_saved">not saved yet</dd>
+        </dl>
+        <button id="focus_save" type="button">Confirm &amp; save</button>
+        <div id="focus_msg" class="manual"></div>
+      </section>
     </aside>
   </main>
   <script>
@@ -345,11 +365,59 @@ _HTML_PAGE = """<!DOCTYPE html>
       };
       return map[phase] || phase || "Idle";
     }
+    let lensTouched = false;
+    let lensTimer = null;
+    function focusUI(f) {
+      const card = el("focuscard");
+      if (!f || f.mode !== "manual") { card.hidden = true; return; }
+      card.hidden = false;
+      const range = f.range || [0, 32];
+      for (const id of ["lens_slider", "lens_num"]) { el(id).min = range[0]; el(id).max = range[1]; }
+      if (!lensTouched && typeof f.lens_position === "number") {
+        el("lens_slider").value = f.lens_position;
+        el("lens_num").value = Number(f.lens_position).toFixed(2);
+      }
+      el("focus_sharp").textContent = f.sharpness == null ? "—" : Number(f.sharpness).toFixed(0);
+      el("focus_saved").textContent = typeof f.saved_lens === "number" ? Number(f.saved_lens).toFixed(2) : "not saved yet";
+      el("focus_save").disabled = !!f.busy;
+    }
+    async function sendFocus(save) {
+      const box = el("focus_msg");
+      try {
+        const r = await fetch("/preview/focus", {
+          method: "POST", cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lens_position: Number(el("lens_num").value), save: save })
+        });
+        const d = await r.json();
+        box.className = "manual" + (d.ok ? " ok" : " error");
+        box.textContent = d.ok ? (save ? "Saved " + Number(d.lens_position).toFixed(2) + " for all later captures" : "") : (d.message || "Failed");
+        if (d.ok && save) lensTouched = false;
+      } catch (err) {
+        box.className = "manual error";
+        box.textContent = "Request failed";
+      }
+    }
+    function onLensInput(value) {
+      lensTouched = true;
+      el("lens_slider").value = value;
+      el("lens_num").value = value;
+      clearTimeout(lensTimer);
+      lensTimer = setTimeout(() => sendFocus(false), 200);
+    }
+    el("lens_slider").addEventListener("input", (e) => onLensInput(e.target.value));
+    el("lens_num").addEventListener("change", (e) => onLensInput(e.target.value));
+    el("focus_save").addEventListener("click", async () => {
+      const v = Number(el("lens_num").value).toFixed(2);
+      if (!confirm("Save lens position " + v + " as the manual focus for all later captures?")) return;
+      await sendFocus(true);
+    });
     async function refresh() {
       try {
         const r = await fetch("/preview/status", { cache: "no-store" });
         if (!r.ok) throw new Error("status " + r.status);
         const d = await r.json();
+        focusUI(d.focus);
         el("state").textContent = d.state || "—";
         el("detection").textContent = d.document_detected ? "detected" : "not detected";
         el("locked").textContent = d.document_locked ? "yes" : "no";
@@ -422,6 +490,8 @@ def _make_handler(viewer: LiveDebugViewer) -> type[BaseHTTPRequestHandler]:
                 self._serve_mjpeg()
             elif path == "/preview/status":
                 self._serve_status()
+            elif path == "/preview/focus":
+                self._json_bytes(viewer.focus_payload())
             else:
                 self.send_error(404, "Not Found")
 
@@ -429,6 +499,8 @@ def _make_handler(viewer: LiveDebugViewer) -> type[BaseHTTPRequestHandler]:
             path = urlparse(self.path).path
             if path == "/preview/capture":
                 self._serve_capture()
+            elif path == "/preview/focus":
+                self._serve_focus()
             else:
                 self.send_error(404, "Not Found")
 
@@ -440,6 +512,44 @@ def _make_handler(viewer: LiveDebugViewer) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+
+        def _serve_focus(self) -> None:
+            """POST {"lens_position": 8.4, "save": false|true}: set (and optionally save) manual focus."""
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(min(length, 4096)) if length > 0 else b""
+            # application/json only: a cross-site form post (text/plain) must not move the lens.
+            if "application/json" not in (self.headers.get("Content-Type") or "").lower():
+                self._json_bytes({"ok": False, "status": "invalid", "message": "Content-Type must be application/json"}, 415)
+                return
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("body must be an object")
+            except ValueError:
+                self._json_bytes({"ok": False, "status": "invalid", "message": "Invalid JSON body"}, 400)
+                return
+            handler = viewer.focus_set_handler
+            if handler is None:
+                self._json_bytes({"ok": False, "status": "unavailable", "message": "Manual focus is not attached"}, 503)
+                return
+            try:
+                result = handler(body.get("lens_position"), bool(body.get("save", False)))
+            except Exception:
+                logger.exception("event=debug_manual_focus_failed")
+                self._json_bytes({"ok": False, "status": "error", "message": "Focus request failed"}, 500)
+                return
+            safe = {
+                "ok": bool(result.get("ok")),
+                "status": str(result.get("status") or ""),
+                "message": str(result.get("message") or ""),
+            }
+            for key in ("lens_position", "saved_lens"):
+                if isinstance(result.get(key), (int, float)):
+                    safe[key] = float(result[key])
+            code = {"ok": 200, "applied": 200, "saved": 200, "invalid": 400, "busy": 409, "disabled": 409}.get(
+                safe["status"], 200 if safe["ok"] else 500
+            )
+            self._json_bytes(safe, code)
 
         def _serve_capture(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
@@ -562,6 +672,8 @@ class LiveDebugViewer:
         self._frame_info: dict[str, Any] | None = None
         self._logged_encode_format = False
         self._capture_handler: Any = None
+        self._focus_status_fn: Any = None
+        self._focus_set_fn: Any = None
 
     @property
     def is_running(self) -> bool:
@@ -573,6 +685,50 @@ class LiveDebugViewer:
 
     def set_capture_handler(self, handler: Any) -> None:
         self._capture_handler = handler
+
+    def set_focus_handlers(self, status_fn: Any, set_fn: Any) -> None:
+        """Manual focus panel: ``status_fn() -> dict`` and ``set_fn(lens, save) -> dict``."""
+        self._focus_status_fn = status_fn
+        self._focus_set_fn = set_fn
+
+    @property
+    def focus_set_handler(self) -> Any:
+        return self._focus_set_fn
+
+    def focus_payload(self) -> dict[str, Any]:
+        """Focus mode/values for the panel, with the live sharpness of the document area."""
+        fn = self._focus_status_fn
+        if fn is None:
+            return {"mode": "auto"}
+        try:
+            payload = dict(fn())
+        except Exception:
+            logger.exception("event=debug_focus_status_failed")
+            return {"mode": "auto"}
+        if payload.get("mode") == "manual":
+            payload["sharpness"] = self._live_sharpness()
+        return payload
+
+    def _live_sharpness(self) -> float | None:
+        """Tenengrad of the document focus area (centre of the frame when none is locked)."""
+        frame = self.latest_frame_copy()
+        if frame is None or frame.ndim < 2:
+            return None
+        roi = None
+        parts = (self.snapshot_meta().focus_roi or "").split(",")
+        if len(parts) == 4:
+            try:
+                roi = tuple(int(float(v)) for v in parts)
+            except ValueError:
+                roi = None
+        try:
+            from idcam.vision.sharpness import clip_roi, preview_sharpness, roi_rect
+
+            if roi is None or roi[2] < 8 or roi[3] < 8:
+                roi = roi_rect(frame.shape, 0.4)
+            return round(float(preview_sharpness(frame, roi=clip_roi(roi, frame.shape))), 1)
+        except Exception:
+            return None
 
     def start(self) -> None:
         if self._started:
@@ -818,6 +974,7 @@ class LiveDebugViewer:
             "capture_started": snap.capture_started,
             "upload_started": snap.upload_started,
             "upload_result": snap.upload_result,
+            "focus": self.focus_payload(),
         }
 
     def wait_jpeg(self, last_seq: int, timeout: float) -> tuple[int, bytes | None]:

@@ -70,6 +70,11 @@ class CameraConfig(BaseModel):
     capture_height: int = Field(6944, ge=480)
     jpeg_quality: int = Field(95, ge=50, le=100)
     preview_fps: float = Field(5.0, gt=0, le=30)
+    # "auto": hardware autofocus + lens search. "manual": autofocus is off; the lens sits at the value
+    # picked and confirmed in the debug panel (saved in manual_focus.json and used for every capture).
+    focus_mode: Literal["auto", "manual"] = "auto"
+    manual_lens_position: float = Field(8.0, ge=0.0, le=32.0)  # used until a value is saved from the panel
+    manual_focus_file: Path | None = None  # default: <state dir>/manual_focus.json (next to temp_dir)
     af_max_retries: int = Field(1, ge=1, le=10)
     af_timeout_sec: float = Field(6.0, gt=0, le=120)
     af_verify_max_retries: int = Field(2, ge=1, le=5)
