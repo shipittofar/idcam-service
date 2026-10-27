@@ -208,8 +208,9 @@ idCam logs `event=led_unavailable` and carries on.
 | Blue, pulsing | Starting up / initializing camera — wait |
 | White | Ready — place a document; stays white through detection, focusing and capture (hold it still) |
 | Blue, blinking | Captured; validating and uploading — wait |
-| Green | Done — remove the document |
-| Orange, blinking | Failed again and again — remove the document, then place it again |
+| Green | Uploaded (a moment) |
+| Green, blinking | Done — remove the document |
+| White, blinking | Failed again and again — remove the document, then place it again |
 | Red for 2 s | Capture or upload failed, then back to the current state's colour |
 | Yellow, blinking | Recovering |
 | Red, blinking | Error (e.g. low storage) |

@@ -110,8 +110,9 @@ debug:
 #   white         ready - place the document (stays white while it is detected, focused and
 #                 captured, because the strip also lights the document)
 #   blue blinking captured - checking and uploading, wait
-#   green         done - remove the document
-#   orange blink  failed again and again - remove the document, then place it again
+#   green         uploaded (for a moment)
+#   green blink   done - remove the document
+#   white blink   failed again and again - remove the document, then place it again
 #   red 2 s       capture or upload failed;  red blinking = error
 #   yellow blink  recovering
 led:
@@ -128,7 +129,7 @@ led:
   #   working: [255, 255, 255]
   #   processing: [0, 0, 255]
   #   success: [0, 255, 0]
-  #   remove: [255, 80, 0]
+  #   remove: [255, 255, 255]
   #   failure: [255, 0, 0]
   #   recovering: [255, 255, 0]
   #   error: [255, 0, 0]

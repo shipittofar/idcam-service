@@ -82,13 +82,15 @@ def main():
         brightness=cfg["brightness"],
     )
 
+    # (meaning, colour, blinking)
     colors = [
-        ("White      = ready: place the document (also lights it while it is captured)", (255, 255, 255)),
-        ("Blue       = captured: checking and uploading, wait", (0, 0, 255)),
-        ("Green      = done: remove the document", (0, 255, 0)),
-        ("Orange     = failed again: remove the document, then place it again", (255, 80, 0)),
-        ("Red        = capture or upload failed (short flash) / error (blinking)", (255, 0, 0)),
-        ("Yellow     = recovering", (255, 255, 0)),
+        ("White          = ready: place the document (also lights it while it is captured)", (255, 255, 255), False),
+        ("Blue blinking  = captured: checking and uploading, wait", (0, 0, 255), True),
+        ("Green          = uploaded (for a moment)", (0, 255, 0), False),
+        ("Green blinking = done: remove the document", (0, 255, 0), True),
+        ("White blinking = failed again: remove the document, then place it again", (255, 255, 255), True),
+        ("Red            = capture or upload failed (short flash) / error (blinking)", (255, 0, 0), False),
+        ("Yellow blinking = recovering", (255, 255, 0), True),
     ]
 
     try:
@@ -96,11 +98,19 @@ def main():
         print("Press Ctrl+C to stop.\n", flush=True)
 
         while True:
-            for name, color in colors:
+            for name, color, blinking in colors:
                 print(f"Status: Displaying {name} | RGB={color}", flush=True)
-                pixels.fill(color)
-                pixels.show()
-                time.sleep(DELAY)
+                if not blinking:
+                    pixels.fill(color)
+                    pixels.show()
+                    time.sleep(DELAY)
+                    continue
+                end = time.monotonic() + DELAY
+                while time.monotonic() < end:
+                    for level in (color, (0, 0, 0)):
+                        pixels.fill(level)
+                        pixels.show()
+                        time.sleep(0.4)
 
     except KeyboardInterrupt:
         print("\nStatus: Stop signal received.", flush=True)

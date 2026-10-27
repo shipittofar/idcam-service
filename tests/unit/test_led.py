@@ -112,11 +112,16 @@ def test_processing_and_upload_are_blue_blinking(state):
     assert _sample(pattern) == {BLUE, OFF}
 
 
-@pytest.mark.parametrize("state", DONE_STATES)
-def test_success_is_solid_green(state):
-    pattern = STATE_PATTERNS[state]
+def test_success_is_solid_green():
+    pattern = STATE_PATTERNS[AppState.SUCCESS]
     assert pattern.mode == "solid"
     assert _sample(pattern) == {GREEN}
+
+
+def test_waiting_for_removal_is_green_blinking():
+    pattern = STATE_PATTERNS[AppState.WAITING_FOR_REMOVAL]
+    assert pattern.mode == "blink"
+    assert _sample(pattern) == {GREEN, OFF}
 
 
 def test_recovery_is_yellow_blinking():
@@ -341,20 +346,24 @@ class TestGuidanceColours:
     def test_default_config_uses_the_standard_table(self):
         table, extras = led_mod.build_patterns(LedConfig())
         assert all(table[state] == pattern for state, pattern in STATE_PATTERNS.items())
-        assert extras["remove"].color == led_mod.ORANGE
+        assert extras["remove"].color == WHITE and extras["remove"].mode == "blink"
 
     def test_every_phase_has_a_distinct_meaning(self):
         table, extras = led_mod.build_patterns(LedConfig())
         assert table[AppState.IDLE].color == WHITE  # place a document
         assert table[AppState.FOCUSING].color == WHITE  # hold still, lit for the camera
         assert table[AppState.UPLOADING].color == BLUE  # captured: wait
-        assert table[AppState.SUCCESS].color == GREEN  # done: remove the document
-        assert extras["remove"].color not in (WHITE, BLUE, GREEN, RED, YELLOW)  # failed: remove, retry
+        assert table[AppState.WAITING_FOR_REMOVAL].color == GREEN  # done: remove the document
+        assert table[AppState.WAITING_FOR_REMOVAL].mode == "blink"
+        assert table[AppState.IDLE].mode == "solid"  # steady white = ready; blinking white = remove
+        assert extras["remove"].mode == "blink"  # failed: blinking white, unlike the steady ready white
 
     def test_colours_can_be_overridden_per_status_without_touching_the_blink_style(self):
         cfg = LedConfig(colors={"success": (0, 128, 255), "processing": (255, 0, 255)})
         table, _ = led_mod.build_patterns(cfg)
         assert table[AppState.SUCCESS].color == (0, 128, 255) and table[AppState.SUCCESS].mode == "solid"
+        assert table[AppState.WAITING_FOR_REMOVAL].color == (0, 128, 255)
+        assert table[AppState.WAITING_FOR_REMOVAL].mode == "blink"
         assert table[AppState.UPLOADING].color == (255, 0, 255) and table[AppState.UPLOADING].mode == "blink"
 
     def test_unknown_status_or_bad_channel_is_rejected(self):
@@ -380,7 +389,7 @@ class TestGuidanceColours:
         led.set_remove_hint(True)
         on = led.current_color(now=led._hint_since + 0.1)
         off = led.current_color(now=led._hint_since + 0.6)
-        assert on == led_mod.ORANGE and off == OFF
+        assert on == WHITE and off == OFF
         led.set_state(AppState.DOCUMENT_DETECTED)
         assert led.current_color(now=time.monotonic()) == WHITE
 

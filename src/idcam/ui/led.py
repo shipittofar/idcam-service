@@ -29,7 +29,6 @@ Color = tuple[int, int, int]
 OFF: Color = (0, 0, 0)
 WHITE: Color = (255, 255, 255)
 YELLOW: Color = (255, 255, 0)
-ORANGE: Color = (255, 80, 0)
 CYAN: Color = (0, 200, 255)
 BLUE: Color = (0, 0, 255)
 GREEN: Color = (0, 255, 0)
@@ -66,12 +65,14 @@ READY = LedPattern(WHITE)
 DOCUMENT = READY
 PROCESSING = LedPattern(BLUE, "blink", 0.6)
 DONE = LedPattern(GREEN)
+# Uploaded and waiting for the document to be taken away: green blinking.
+REMOVAL_WAIT = LedPattern(GREEN, "blink", 0.8)
 RECOVERING = LedPattern(YELLOW, "blink", 1.0)
 FAULT = LedPattern(RED, "blink", 1.0)
 DARK = LedPattern(OFF)
 FAILURE_FLASH = LedPattern(RED)
 # Failed repeatedly and the document is still there: take it away, then place it again.
-REMOVE_HINT = LedPattern(ORANGE, "blink", 0.8)
+REMOVE_HINT = LedPattern(WHITE, "blink", 0.8)
 # "working" colour when illuminate_during_capture is off.
 WORKING_COLORED = LedPattern(CYAN, "pulse", 1.5)
 
@@ -91,7 +92,7 @@ STATE_PATTERNS: dict[AppState, LedPattern] = {
     AppState.WAITING_FOR_SERVER: PROCESSING,
     AppState.PROCESSING_RESPONSE: PROCESSING,
     AppState.SUCCESS: DONE,
-    AppState.WAITING_FOR_REMOVAL: DONE,
+    AppState.WAITING_FOR_REMOVAL: REMOVAL_WAIT,
     AppState.RECOVERY: RECOVERING,
     AppState.ERROR: FAULT,
     AppState.SHUTDOWN: DARK,
@@ -112,7 +113,6 @@ _PROCESSING_STATES = (
     AppState.WAITING_FOR_SERVER,
     AppState.PROCESSING_RESPONSE,
 )
-_SUCCESS_STATES = (AppState.SUCCESS, AppState.WAITING_FOR_REMOVAL)
 
 
 def _recolor(pattern: LedPattern, color: Color | None) -> LedPattern:
@@ -134,12 +134,14 @@ def build_patterns(config: LedConfig) -> tuple[dict[AppState, LedPattern], dict[
         "ready": ((AppState.IDLE,), READY),
         "working": (_WORKING_STATES, working),
         "processing": (_PROCESSING_STATES, PROCESSING),
-        "success": (_SUCCESS_STATES, DONE),
+        "success": ((AppState.SUCCESS,), DONE),
+        # same colour as "success", blinking, while the user is asked to take the document away
+        "success_wait": ((AppState.WAITING_FOR_REMOVAL,), REMOVAL_WAIT),
         "recovering": ((AppState.RECOVERY,), RECOVERING),
         "error": ((AppState.ERROR,), FAULT),
     }
     for name, (states, base) in groups.items():
-        pattern = _recolor(base, colors.get(name))
+        pattern = _recolor(base, colors.get("success" if name == "success_wait" else name))
         for state in states:
             table[state] = pattern
     # "working" follows "ready" when it is meant to be the same light on the document.
