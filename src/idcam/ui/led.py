@@ -8,6 +8,9 @@ and turns itself off. It never raises into the capture pipeline.
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -33,10 +36,11 @@ GREEN: Color = (0, 255, 0)
 RED: Color = (255, 0, 0)
 
 FRAME_INTERVAL_SEC = 0.05
-# At boot the service can start before /dev/pio0 (RP1 PIO) or its permissions exist, and the
-# first attempt then failed for good, leaving the strip dark until the next restart.
-CONNECT_RETRY_SEC = 5.0
-CONNECT_MAX_ATTEMPTS = 120  # ~10 minutes
+# Seconds to wait before restarting a worker that died, by consecutive failure (the last value
+# repeats). At boot the strip's driver or Blinka's dependency check can fail for a while.
+WORKER_BACKOFF_SEC = (5.0, 10.0, 20.0, 40.0, 60.0)
+# A worker that stays up this long counts as healthy again (failure counter resets).
+WORKER_STABLE_SEC = 10.0
 
 
 @dataclass(frozen=True)
@@ -184,6 +188,143 @@ class Pi5NeopixelBackend:
         self.show(OFF)
 
 
+class SubprocessLedBackend:
+    """Drives the strip through ``idcam.ui.led_worker`` and restarts it when it dies.
+
+    ``show`` and ``poll`` never raise: a strip that cannot be opened only means no LEDs. Colours
+    travel as ``R G B`` lines over the worker's stdin; after a restart the last colour is sent
+    again, so the strip comes up in the right state without waiting for the next state change.
+    """
+
+    def __init__(self, config: LedConfig, command: list[str] | None = None) -> None:
+        self._command = command or [
+            sys.executable,
+            "-m",
+            "idcam.ui.led_worker",
+            "--pin",
+            str(config.gpio_pin),
+            "--count",
+            str(config.count),
+            "--brightness",
+            str(config.brightness),
+            "--byteorder",
+            config.byteorder,
+        ]
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._err: tempfile._TemporaryFileWrapper | None = None  # worker stderr (a file never fills up like a pipe)
+        self._last: Color = OFF
+        self._failures = 0
+        self._next_spawn = 0.0
+        self._spawned_at = 0.0
+
+    def show(self, color: Color) -> None:
+        with self._lock:
+            self._last = color
+            if not self._ensure_worker():  # a freshly started worker already got this colour
+                self._send(color)
+
+    def poll(self) -> None:
+        """Called by the indicator thread: restarts a dead worker even when the colour is steady."""
+        with self._lock:
+            self._ensure_worker()
+
+    def close(self) -> None:
+        with self._lock:
+            proc, self._proc = self._proc, None
+            if proc is None:
+                return
+            try:
+                self._write(proc, OFF)
+                proc.stdin.close()  # type: ignore[union-attr]
+                proc.wait(timeout=2.0)
+            except Exception:
+                proc.kill()
+            finally:
+                self._drop_err()
+
+    # -- internals (lock held) ---------------------------------------------------------------
+
+    def _ensure_worker(self) -> bool:
+        """Make sure a worker is running; True when one was just started (and sent ``_last``)."""
+        proc = self._proc
+        now = time.monotonic()
+        if proc is not None and proc.poll() is None:
+            if self._failures and now - self._spawned_at >= WORKER_STABLE_SEC:
+                self._failures = 0
+            return False
+        if proc is not None:
+            self._note_exit(proc, now)
+            self._proc = None
+        if now < self._next_spawn:
+            return False
+        try:
+            self._err = tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace")
+            self._proc = subprocess.Popen(
+                self._command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=self._err,
+                text=True,
+                encoding="ascii",
+            )
+        except OSError as exc:
+            self._drop_err()
+            self._failures += 1
+            self._next_spawn = now + self._backoff()
+            logger.warning("event=led_worker_spawn_failed error=%s", exc)
+            return False
+        self._spawned_at = now
+        self._write(self._proc, self._last)  # colour the strip as soon as it opens
+        return True
+
+    def _backoff(self) -> float:
+        return WORKER_BACKOFF_SEC[min(max(self._failures, 1), len(WORKER_BACKOFF_SEC)) - 1]
+
+    def _drop_err(self) -> None:
+        err, self._err = self._err, None
+        if err is not None:
+            try:
+                err.close()
+            except Exception:
+                pass
+
+    def _note_exit(self, proc: subprocess.Popen, now: float) -> None:
+        error: list[str] = []
+        try:
+            if self._err is not None:
+                self._err.seek(0)
+                error = self._err.read().strip().splitlines()[-1:]
+        except Exception:
+            error = []
+        finally:
+            self._drop_err()
+        self._failures += 1
+        self._next_spawn = now + self._backoff()
+        # Log the first failure and then only every 5th, so a missing strip does not flood the log.
+        if self._failures == 1 or self._failures % 5 == 0:
+            logger.warning(
+                "event=led_unavailable exit_code=%s attempt=%d retry_in_sec=%.0f error=%s",
+                proc.returncode,
+                self._failures,
+                self._backoff(),
+                error[0] if error else "",
+            )
+
+    def _send(self, color: Color) -> None:
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            self._write(proc, color)
+
+    @staticmethod
+    def _write(proc: subprocess.Popen, color: Color) -> None:
+        try:
+            proc.stdin.write(f"{color[0]} {color[1]} {color[2]}\n")  # type: ignore[union-attr]
+            proc.stdin.flush()  # type: ignore[union-attr]
+        except (BrokenPipeError, OSError, ValueError):
+            pass  # worker is gone; the next poll()/show() restarts it
+
+
 class LedIndicator:
     """Shows the application state on a WS2812B strip from a background thread."""
 
@@ -214,48 +355,17 @@ class LedIndicator:
     def start(self) -> None:
         if not self.config.enabled or self._thread is not None:
             return
-        self._stop.clear()
         if self._backend is None:
-            try:
-                self._backend = Pi5NeopixelBackend(self.config)
-            except Exception as exc:
-                logger.warning(
-                    "event=led_unavailable error=%s retrying_every_sec=%.0f gpio=%d",
-                    exc,
-                    CONNECT_RETRY_SEC,
-                    self.config.gpio_pin,
-                )
-                self._thread = threading.Thread(target=self._connect_then_run, name="idcam-led", daemon=True)
-                self._thread.start()
-                return
+            self._backend = SubprocessLedBackend(self.config)
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="idcam-led", daemon=True)
         self._thread.start()
-        self._log_started()
-
-    def _log_started(self, attempt: int | None = None) -> None:
         logger.info(
-            "event=led_started gpio=%d count=%d brightness=%.2f%s",
+            "event=led_started gpio=%d count=%d brightness=%.2f",
             self.config.gpio_pin,
             self.config.count,
             self.config.brightness,
-            f" after_attempts={attempt}" if attempt else "",
         )
-
-    def _connect_then_run(self) -> None:
-        """Keep trying to open the strip (hardware not ready yet at boot), then drive it."""
-        for attempt in range(2, CONNECT_MAX_ATTEMPTS + 2):
-            if self._stop.wait(CONNECT_RETRY_SEC):
-                return
-            try:
-                self._backend = Pi5NeopixelBackend(self.config)
-            except Exception as exc:
-                if attempt % 12 == 0:
-                    logger.warning("event=led_still_unavailable attempts=%d error=%s", attempt, exc)
-                continue
-            self._log_started(attempt)
-            self._run()
-            return
-        logger.warning("event=led_gave_up attempts=%d", CONNECT_MAX_ATTEMPTS + 1)
 
     def set_state(self, state: AppState) -> None:
         pattern = self._patterns.get(state, FAULT)
@@ -309,6 +419,9 @@ class LedIndicator:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            poll = getattr(self._backend, "poll", None)
+            if callable(poll):
+                poll()
             color = self.current_color()
             if color != self._last_color:
                 try:

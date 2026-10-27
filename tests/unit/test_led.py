@@ -1,5 +1,7 @@
 """WS2812B status LED indicator."""
 
+import os
+import sys
 import time
 from unittest.mock import MagicMock
 
@@ -269,16 +271,15 @@ def test_disabled_by_default_never_touches_hardware(monkeypatch):
     assert not indicator.active
 
 
-def test_missing_libraries_disable_indicator_without_raising(monkeypatch):
-    def missing(_config):
-        raise ModuleNotFoundError("No module named 'board'")
-
-    monkeypatch.setattr(led_mod, "Pi5NeopixelBackend", missing)
-    indicator = LedIndicator(LedConfig(enabled=True))
+def test_missing_libraries_never_raise_and_stay_dark(monkeypatch):
+    """The strip lives in a worker process; failing to open it must not touch the service."""
+    failing = [sys.executable, "-c", "import sys; print('ModuleNotFoundError: board', file=sys.stderr); sys.exit(3)"]
+    monkeypatch.setattr(led_mod, "WORKER_BACKOFF_SEC", (0.05,))
+    indicator = LedIndicator(LedConfig(enabled=True), backend=led_mod.SubprocessLedBackend(LedConfig(), command=failing))
     indicator.start()
-    assert not indicator.active
     indicator.set_state(AppState.ERROR)
     indicator.flash_failure()
+    time.sleep(0.3)
     indicator.stop()
 
 
@@ -391,39 +392,135 @@ class TestGuidanceColours:
         assert led.current_color() == RED
 
 
-def test_strip_that_is_not_ready_at_boot_is_picked_up_later(monkeypatch):
-    """Service starts before /dev/pio0 is usable: keep retrying instead of staying dark."""
-    backend = FakeBackend()
-    attempts = {"n": 0}
+# --- worker process supervision ----------------------------------------------------------
 
-    def flaky(_config):
-        attempts["n"] += 1
-        if attempts["n"] < 3:
-            raise PermissionError("/dev/pio0")
-        return backend
+ECHO_WORKER = (
+    "import sys, os; out = open(sys.argv[1], 'a', buffering=1)\n"
+    "for line in sys.stdin: out.write(line)\n"
+)
 
-    monkeypatch.setattr(led_mod, "Pi5NeopixelBackend", flaky)
-    monkeypatch.setattr(led_mod, "CONNECT_RETRY_SEC", 0.02)
-    indicator = LedIndicator(LedConfig(enabled=True))
-    indicator.start()
-    assert not indicator.active  # first attempt failed
-    indicator.set_state(AppState.IDLE)
+
+def _worker_backend(tmp_path, script=ECHO_WORKER):
+    log = tmp_path / "colours.txt"
+    return led_mod.SubprocessLedBackend(LedConfig(), command=[sys.executable, "-c", script, str(log)]), log
+
+
+def test_worker_receives_each_colour_as_rgb_line(tmp_path):
+    backend, log = _worker_backend(tmp_path)
     try:
-        assert _wait_for(lambda: indicator.active, timeout=2.0)
-        assert _wait_for(lambda: WHITE in backend.shown, timeout=2.0)
+        backend.show((255, 255, 255))
+        backend.show((0, 255, 0))
+        assert _wait_for(lambda: log.exists() and log.read_text().split("\n")[:2] == ["255 255 255", "0 255 0"], 3.0)
+    finally:
+        backend.close()
+
+
+def test_dead_worker_is_restarted_and_gets_the_current_colour_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(led_mod, "WORKER_BACKOFF_SEC", (0.05,))
+    # first run exits right away (hardware not ready at boot); later runs stay up and log colours
+    script = (
+        "import sys, os\n"
+        "marker = sys.argv[1] + '.ran'\n"
+        "if not os.path.exists(marker):\n"
+        "    open(marker, 'w').close(); sys.exit(3)\n"
+        "out = open(sys.argv[1], 'a', buffering=1)\n"
+        "for line in sys.stdin: out.write(line)\n"
+    )
+    backend, log = _worker_backend(tmp_path, script)
+    try:
+        backend.show((255, 255, 255))  # worker spawns and dies at once
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline and not (log.exists() and "255 255 255" in log.read_text()):
+            backend.poll()  # the indicator thread does this every frame
+            time.sleep(0.05)
+        assert log.exists() and "255 255 255" in log.read_text()  # steady colour was re-sent
+    finally:
+        backend.close()
+
+
+def test_indicator_thread_restarts_a_late_strip_without_a_colour_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(led_mod, "WORKER_BACKOFF_SEC", (0.05,))
+    script = (
+        "import sys, os\n"
+        "marker = sys.argv[1] + '.ran'\n"
+        "if not os.path.exists(marker):\n"
+        "    open(marker, 'w').close(); sys.exit(3)\n"
+        "out = open(sys.argv[1], 'a', buffering=1)\n"
+        "for line in sys.stdin: out.write(line)\n"
+    )
+    backend, log = _worker_backend(tmp_path, script)
+    indicator = LedIndicator(LedConfig(enabled=True), backend=backend)
+    indicator.start()
+    indicator.set_state(AppState.IDLE)  # white, then nothing changes for the rest of the test
+    try:
+        assert _wait_for(lambda: log.exists() and "255 255 255" in log.read_text(), 5.0)
     finally:
         indicator.stop()
-    assert attempts["n"] == 3
 
 
-def test_stop_ends_the_retry_loop_promptly(monkeypatch):
-    def never(_config):
-        raise PermissionError("/dev/pio0")
+def test_worker_exit_error_is_logged_once_and_backoff_grows(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(led_mod, "WORKER_BACKOFF_SEC", (0.01, 0.02))
+    failing = [sys.executable, "-c", "import sys; print('RuntimeError: pio unavailable', file=sys.stderr); sys.exit(3)"]
+    backend = led_mod.SubprocessLedBackend(LedConfig(), command=failing)
+    try:
+        with caplog.at_level("WARNING"):
+            for _ in range(60):
+                backend.poll()
+                time.sleep(0.02)
+        messages = [r.getMessage() for r in caplog.records if "led_unavailable" in r.getMessage()]
+        assert messages and "pio unavailable" in messages[0]
+        assert "attempt=1 " in messages[0]
+        assert len(messages) < 2 or "attempt=5 " in messages[1]  # logged 1st, 5th, 10th ... not every retry
+    finally:
+        backend.close()
 
-    monkeypatch.setattr(led_mod, "Pi5NeopixelBackend", never)
-    monkeypatch.setattr(led_mod, "CONNECT_RETRY_SEC", 30.0)
-    indicator = LedIndicator(LedConfig(enabled=True))
-    indicator.start()
-    started = time.monotonic()
-    indicator.stop()
-    assert time.monotonic() - started < 1.5
+
+def test_close_turns_the_strip_off_and_stops_the_worker(tmp_path):
+    backend, log = _worker_backend(tmp_path)
+    backend.show((255, 255, 255))
+    assert _wait_for(lambda: log.exists() and "255 255 255" in log.read_text(), 3.0)
+    proc = backend._proc
+    backend.close()
+    assert proc.poll() is not None
+    assert "0 0 0" in log.read_text()
+
+
+def test_worker_module_protocol_ignores_garbage_and_clamps(monkeypatch, tmp_path):
+    from idcam.ui import led_worker
+
+    shown = []
+
+    class Strip:
+        def __init__(self, _config):
+            pass
+
+        def show(self, color):
+            shown.append(color)
+
+        def close(self):
+            shown.append("closed")
+
+    import idcam.ui.led as led_mod2
+
+    monkeypatch.setattr(led_mod2, "Pi5NeopixelBackend", Strip)
+    pipe = tmp_path / "in.txt"
+    pipe.write_text("10 20 30\nnot a colour\n999 -5 7\n1 2\n", encoding="ascii")
+    monkeypatch.setattr(led_worker, "_take_command_pipe", lambda: open(pipe, encoding="ascii"))
+
+    assert led_worker.main(["--pin", "18", "--count", "30", "--brightness", "0.2"]) == 0
+    assert shown == [(10, 20, 30), (255, 0, 7), "closed"]
+
+
+def test_worker_reports_init_failure_with_exit_code_3(monkeypatch, tmp_path, capsys):
+    from idcam.ui import led_worker
+
+    import idcam.ui.led as led_mod2
+
+    def boom(_config):
+        raise SystemExit("Blinka found installed platform dependencies with unsupported versions")
+
+    monkeypatch.setattr(led_mod2, "Pi5NeopixelBackend", boom)
+    monkeypatch.setattr(led_worker, "_take_command_pipe", lambda: open(os.devnull, encoding="ascii"))
+
+    assert led_worker.main(["--pin", "18", "--count", "30", "--brightness", "0.2"]) == led_worker.EXIT_INIT_FAILED
+    assert "unsupported versions" in capsys.readouterr().err
