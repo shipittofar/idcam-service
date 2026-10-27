@@ -80,7 +80,25 @@ class CameraConfig(BaseModel):
     af_refine_max_points: int = Field(7, ge=3, le=15)
     af_refine_settle_sec: float = Field(0.3, ge=0.05, le=2.0)
     # Frames to throw away after each lens move: the capture queue holds frames from before it.
+    # (Only used when the camera cannot deliver "fresh" frames; see capture_fresh_preview_array.)
     af_refine_discard_frames: int = Field(5, ge=0, le=12)
+    # Adaptive refinement: skip the finest probe and the confirming re-measurement when the
+    # sharpness curve already has a clean, bracketed peak. false = always run every stage.
+    af_adaptive: bool = True
+    # Start from the lens position of the last validated capture (bounded local search); fall back
+    # to hardware AF + the full search when no clear peak is found around it.
+    af_lens_memory: bool = True
+    af_memory_max_age_sec: float = Field(1800.0, gt=0, le=86400)
+    # Wait for the lens to reach the commanded position (frame metadata) instead of a fixed
+    # af_refine_settle_sec; af_refine_settle_sec stays the upper bound, af_refine_min_settle_sec
+    # the lower one. Frames are always taken after the settle time.
+    af_settle_by_metadata: bool = True
+    af_refine_min_settle_sec: float = Field(0.12, ge=0.0, le=1.0)
+    af_settle_tolerance: float = Field(0.06, gt=0.0, le=1.0)  # dioptres
+    # Two fresh frames at one lens position that differ by more than this ratio (min/max) mean the
+    # page or camera is moving; af_motion_max_unstable such samples abort the search.
+    af_motion_spread_min: float = Field(0.5, gt=0.0, lt=1.0)
+    af_motion_max_unstable: int = Field(3, ge=1, le=20)
     # When the sharpness curve has no clear peak, scan this lens range (dioptres, 0 = infinity).
     af_wide_sweep: bool = True
     af_wide_min: float = Field(4.0, ge=0, le=32)

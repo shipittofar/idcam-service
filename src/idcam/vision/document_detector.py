@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import time
+
 import cv2
 import numpy as np
 
@@ -99,6 +101,16 @@ class DocumentDetector:
         self._lock_prev_norm: np.ndarray | None = None
         self._last_geometry: Any = None
         self._prev_corners: tuple[tuple[int, int], ...] | None = None
+        self._first_seen_at: float | None = None
+        # Frame the cached ``_last_geometry`` was computed on (identity check, see _geometry_for).
+        self._geometry_frame: np.ndarray | None = None
+
+    @property
+    def detection_latency_ms(self) -> int:
+        """Time since the first frame that showed the document (0 when none is being tracked)."""
+        if self._first_seen_at is None:
+            return 0
+        return int((time.monotonic() - self._first_seen_at) * 1000)
 
     @property
     def last_motion(self) -> float:
@@ -128,6 +140,7 @@ class DocumentDetector:
             max_area_fraction=self.config.geometry_max_area_fraction,
         )
         self._last_geometry = geom
+        self._geometry_frame = frame
         if geom:
             self._last_document_roi = geom.bbox
             self._last_focus_roi = inscribed_focus_roi(
@@ -400,12 +413,15 @@ class DocumentDetector:
 
         if geom and geom.confidence >= self.config.min_geometry_confidence:
             self._present_frames += 1
+            if self._present_frames == 1:
+                self._first_seen_at = time.monotonic()
             self._absent_frames = 0
             self._last_reject_reason = ""
             if not self._detected_latched and self._present_frames >= self.config.detect_frames_required:
                 self._detected_latched = True
         else:
             self._present_frames = 0
+            self._first_seen_at = None
             if self._detected_latched:
                 self._absent_frames += 1
                 if self._absent_frames >= self.config.lose_frames_required:
@@ -458,11 +474,16 @@ class DocumentDetector:
     def structural_motion_in_lock(self, frame: np.ndarray) -> float:
         if not self.lock.is_locked:
             return self._last_frame_motion
-        geom = detect_document_geometry(
-            frame,
-            min_area_fraction=self.config.geometry_min_area_fraction,
-            max_area_fraction=self.config.geometry_max_area_fraction,
-        )
+        # The pre-capture check runs is_scene_empty() on this very frame first: reuse that result
+        # instead of segmenting the same frame a second time (~0.1 s on the Pi).
+        if self._geometry_frame is frame:
+            geom = self._last_geometry
+        else:
+            geom = detect_document_geometry(
+                frame,
+                min_area_fraction=self.config.geometry_min_area_fraction,
+                max_area_fraction=self.config.geometry_max_area_fraction,
+            )
         # Re-detection can pick a different quadrilateral (e.g. whole frame vs the paper) after
         # focus changes; corner distance between different objects is not document movement
         # (observed motion=380 with a still document). Only compare corners of the same object.

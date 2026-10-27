@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from idcam.config.schema import DetectionConfig
+from idcam.vision import document_detector as det_module
 from idcam.vision.document_detector import DocumentDetector
 from idcam.vision.document_geometry import (
     corner_motion,
@@ -356,3 +357,21 @@ class TestBorderAndRebaseline:
         det.rebaseline_motion(frame)
 
         assert det.structural_motion_in_lock(frame) < 5.0
+
+
+class TestGeometryReuse:
+    def test_pre_capture_check_segments_the_frame_only_once(self):
+        from unittest.mock import patch
+
+        det = DocumentDetector(DetectionConfig(min_geometry_confidence=0.25))
+        frame = _document_frame(margin_x=90, margin_y=70)
+        det.detect(frame)
+        det.lock_document(frame)
+
+        real = det_module.detect_document_geometry
+        with patch.object(det_module, "detect_document_geometry", wraps=real) as spy:
+            det.is_scene_empty(frame)  # what _abort_if_document_gone does
+            det.structural_motion_in_lock(frame)  # what the motion check does next
+            assert spy.call_count == 1
+            det.structural_motion_in_lock(_document_frame(margin_x=90, margin_y=70))  # a new frame is analysed
+            assert spy.call_count == 2

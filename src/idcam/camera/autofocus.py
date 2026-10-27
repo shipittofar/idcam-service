@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from idcam.config.schema import CameraConfig, QualityConfig, QualityConfig
-from idcam.exceptions import AutofocusError
+from idcam.exceptions import AutofocusError, FocusMotionError
 from idcam.logging.setup import get_logger
 from idcam.vision.sharpness import accept_preview_focus, clip_roi, preview_sharpness, roi_rect
 
@@ -104,6 +104,30 @@ class AutofocusController:
         self.capabilities = AutofocusCapabilities()
         self.debug = AutofocusDebug()
         self._last_preview_roi: tuple[int, int, int, int] = (0, 0, 0, 0)
+        # (lens position, monotonic time) of the last capture that passed validation.
+        self._memory: tuple[float, float] | None = None
+        self.last_refine_stats: dict[str, Any] = {}
+
+    # -- lens memory ---------------------------------------------------------------------------
+
+    @property
+    def remembered_lens(self) -> float | None:
+        memory = self._memory
+        if memory is None or not self.config.af_lens_memory:
+            return None
+        if time.monotonic() - memory[1] > float(self.config.af_memory_max_age_sec):
+            return None
+        return memory[0]
+
+    def remember_lens(self, lens: float | None) -> None:
+        """Called after a capture taken at ``lens`` passed validation (a known-good position)."""
+        if lens is not None and self.config.af_lens_memory:
+            self._memory = (float(lens), time.monotonic())
+
+    def forget_lens(self, reason: str = "") -> None:
+        if self._memory is not None:
+            logger.info("event=autofocus_memory_cleared lens=%.2f reason=%s", self._memory[0], reason)
+        self._memory = None
 
     @property
     def hardware_af_available(self) -> bool:
@@ -134,6 +158,9 @@ class AutofocusController:
             return clip_roi(preview_roi, frame.shape)
         return clip_roi(roi_rect(frame.shape, roi_fraction), frame.shape)
 
+    def _refine_available(self, camera: FocusCapableCamera) -> bool:
+        return bool(self.config.af_refine) and callable(getattr(camera, "set_lens_position", None))
+
     async def run_autofocus(
         self,
         camera: FocusCapableCamera,
@@ -142,6 +169,7 @@ class AutofocusController:
         preview_roi: tuple[int, int, int, int] | None = None,
         sharpness_threshold: float | None = None,
     ) -> AutofocusResult:
+        t_start = time.monotonic()
         floor = float(
             sharpness_threshold if sharpness_threshold is not None else self.quality.preview_min_sharpness
         )
@@ -163,6 +191,7 @@ class AutofocusController:
         lens_before = meta_before.get("LensPosition")
         self._last_preview_roi = roi
         self._fill_debug(roi, sensor, preview_size, mapping, before, lens_before)
+        t_prep = time.monotonic()
 
         logger.info(
             "event=pipeline_stage stage=focusing focus_method=measure "
@@ -174,6 +203,35 @@ class AutofocusController:
             lens_before,
         )
 
+        refine_ok = self._refine_available(camera)
+
+        # Fast path: same setup as the last validated capture, so start the lens search there and
+        # skip the hardware AF cycle. A bounded local search must find a clear peak; otherwise the
+        # memory is dropped and the full procedure below runs (hardware AF + refinement + sweep).
+        remembered = self.remembered_lens if refine_ok else None
+        if remembered is not None:
+            try:
+                refined = await self._refine_focus(camera, roi, remembered, before, local_only=True)
+            except FocusMotionError:
+                raise
+            except AutofocusError as exc:
+                logger.info("event=autofocus_memory_miss lens=%.2f reason=%s", remembered, exc)
+                self.forget_lens("local_search_failed")
+                refined = None
+            if refined is not None:
+                lens_after, after = refined
+                ratio = after / before if before > 1e-6 else 1.0
+                self.debug.method = "memory+refine"
+                self.debug.lens_after = float(lens_after)
+                self.debug.focus_after = after
+                self.debug.improvement_ratio = round(ratio, 3)
+                self._log_focus_timing("memory", t_start, t_prep, None, time.monotonic())
+                logger.info("event=pipeline_stage stage=focus_verified method=memory+refine sharpness=%.1f", after)
+                return self._result(
+                    True, after, 0, "memory+refine", floor, before, after, ratio, roi, sensor,
+                    preview_size, lens_before, lens_after,
+                )
+
         # No "already sharp" shortcut: comparing a frame with itself always passes, so AF
         # never ran and the lens stayed wherever Continuous AF last drifted (it moved
         # between this check and the still). Always run a one-shot AF on the document
@@ -182,8 +240,10 @@ class AutofocusController:
         lens_after = lens_before
         method = "none"
         ratio = 0.0
+        t_hw_start = time.monotonic()
 
-        # At least two passes: the first can land worse than the drifting Continuous AF.
+        # At least two passes: the first can land worse than the drifting Continuous AF. When the
+        # lens search follows anyway, one hardware pass is enough (its result is only a start).
         for attempt in range(1, max(2, self.config.af_max_retries) + 1):
             self.debug.running = True
             self.debug.attempt = attempt
@@ -209,6 +269,7 @@ class AutofocusController:
             self.debug.lens_after = float(lens_after) if lens_after is not None else None
             self.debug.improvement_ratio = round(ratio, 3)
             self.debug.running = False
+            t_hw_end = time.monotonic()
 
             logger.info(
                 "event=autofocus_result focus_method=%s success=%s sharpness_before=%.1f "
@@ -226,8 +287,12 @@ class AutofocusController:
                 self.debug.preview_roi,
             )
 
-            if accepted:
+            if accepted or (refine_ok and self.config.af_adaptive):
                 refined = await self._refine_focus(camera, roi, lens_after, after)
+                if refined is None and not accepted:
+                    before = after
+                    lens_before = lens_after
+                    continue
                 if refined is not None:
                     lens_after, after = refined
                     self.debug.lens_after = float(lens_after)
@@ -238,6 +303,7 @@ class AutofocusController:
                     pause = getattr(camera, "pause_autofocus", None)
                     if callable(pause):
                         await asyncio.to_thread(pause)
+                self._log_focus_timing("hardware", t_start, t_prep, (t_hw_start, t_hw_end), time.monotonic())
                 logger.info("event=pipeline_stage stage=focus_verified method=%s sharpness=%.1f", method, after)
                 return self._result(
                     True, after, attempt, method, floor, before, after, ratio, roi, sensor, preview_size, lens_before, lens_after
@@ -250,54 +316,177 @@ class AutofocusController:
             f"ratio={ratio:.2f} method={method} preview_roi={_fmt_roi(roi)}"
         )
 
+    def _log_focus_timing(
+        self,
+        path: str,
+        t_start: float,
+        t_prep: float,
+        hw: tuple[float, float] | None,
+        t_end: float,
+    ) -> None:
+        stats = self.last_refine_stats
+        logger.info(
+            "event=focus_timing path=%s prep_ms=%d hw_af_ms=%s refine_ms=%d total_ms=%d samples=%s "
+            "settle=%s confirm=%s unstable_samples=%s",
+            path,
+            int((t_prep - t_start) * 1000),
+            int((hw[1] - hw[0]) * 1000) if hw else "skipped",
+            int(stats.get("refine_ms", 0)),
+            int((t_end - t_start) * 1000),
+            stats.get("samples"),
+            stats.get("settle"),
+            stats.get("confirm"),
+            stats.get("unstable"),
+        )
+
+    @staticmethod
+    def _bracketed(pts: dict[float, float], best: float, margin: float) -> bool:
+        """The best position has a measured neighbour on each side, both clearly lower."""
+        below = [p for p in pts if p < best]
+        above = [p for p in pts if p > best]
+        if not below or not above:
+            return False
+        lower, upper = max(below), min(above)
+        return pts[lower] <= pts[best] * (1.0 - margin) and pts[upper] <= pts[best] * (1.0 - margin)
+
+    @classmethod
+    def _clean_peak(cls, pts: dict[float, float], best: float, unstable: int) -> bool:
+        """A single, bracketed peak without motion hints: safe to skip re-confirming it."""
+        if unstable or len(pts) < 3 or not cls._bracketed(pts, best, 0.04):
+            return False
+        ordered = [pts[p] for p in sorted(pts)]
+        peak = ordered.index(pts[best])
+        rising = all(ordered[i] <= ordered[i + 1] * 1.03 for i in range(peak))
+        falling = all(ordered[i + 1] <= ordered[i] * 1.03 for i in range(peak, len(ordered) - 1))
+        return rising and falling
+
     async def _refine_focus(
         self,
         camera: FocusCapableCamera,
         roi: tuple[int, int, int, int],
         lens_start: Any,
         start_sharpness: float,
+        *,
+        local_only: bool = False,
     ) -> tuple[float, float] | None:
         """Find the lens position with the sharpest document ROI and park the lens there.
 
-        Hill-climb from the AF result (coarse, then fine steps). If the sharpness curve has no
+        Hill-climb from ``lens_start`` (coarse, then fine steps). If the sharpness curve has no
         clear peak the AF stopped on a plateau, so scan a wide lens range and climb again from
-        the best point. Returns (lens_position, sharpness), or None when refinement is
-        unavailable or failed (the caller then locks the lens as before).
+        the best point. ``local_only`` (used from the remembered position) never sweeps: it
+        raises AutofocusError unless the bounded search finds a clearly bracketed peak.
+
+        Returns (lens_position, sharpness), or None when refinement is unavailable or failed
+        (the caller then locks the lens as before).
         """
         setter = getattr(camera, "set_lens_position", None)
         if not (self.config.af_refine and callable(setter)) or lens_start is None:
             return None
+        cfg = self.config
         range_fn = getattr(camera, "lens_position_range", None)
         lo, hi = range_fn() if callable(range_fn) else (0.0, 32.0)
-        step = float(self.config.af_refine_step)
-        settle = float(self.config.af_refine_settle_sec)
-        discard = int(self.config.af_refine_discard_frames)
-        max_points = int(self.config.af_refine_max_points)
+        step = float(cfg.af_refine_step)
+        settle = float(cfg.af_refine_settle_sec)
+        min_settle = min(float(cfg.af_refine_min_settle_sec), settle)
+        tolerance = float(cfg.af_settle_tolerance)
+        discard = int(cfg.af_refine_discard_frames)
+        adaptive = bool(cfg.af_adaptive)
+        max_points = int(cfg.af_refine_max_points)
+        if local_only:
+            max_points = min(max_points, 5)
         start = min(max(float(lens_start), lo), hi)
         pts: dict[float, float] = {}
+        order: list[float] = []
         fresh_frame = getattr(camera, "capture_fresh_preview_array", None)
+        stats = {"unstable": 0, "meta_settled": 0, "meta_timeout": 0, "meta_missing": 0}
+        t_refine = time.monotonic()
 
         def clamp(pos: float) -> float:
             return round(min(max(pos, lo), hi), 3)
 
-        async def measure(pos: float) -> float:
+        def sample_frames(pos: float, full_settle: bool) -> tuple[float, float | None, dict[str, Any]]:
+            """Runs in a worker thread: wait for the lens, then measure fresh frames."""
+            info: dict[str, Any] = {"lens_ok": None, "lens_meta": None}
+            t_cmd = time.monotonic()
+            if not callable(fresh_frame):
+                time.sleep(settle)
+                for _ in range(discard):
+                    camera.capture_preview_array()
+                frame = camera.capture_preview_array()
+                info["waited_ms"] = int((time.monotonic() - t_cmd) * 1000)
+                return float(preview_sharpness(frame, roi=roi)), None, info
+
+            use_meta = bool(cfg.af_settle_by_metadata) and not full_settle
+            time.sleep(min_settle if use_meta else settle)
+            frame = fresh_frame()
+            lens_meta = getattr(camera, "last_fresh_lens", None)
+            if use_meta:
+                if lens_meta is None:
+                    # No lens metadata from this camera: wait out the full settle time as before.
+                    info["lens_ok"] = None
+                    remaining = settle - (time.monotonic() - t_cmd)
+                    if remaining > 0:
+                        time.sleep(remaining)
+                        frame = fresh_frame()
+                        lens_meta = getattr(camera, "last_fresh_lens", None)
+                elif abs(lens_meta - pos) <= tolerance:
+                    info["lens_ok"] = True
+                else:
+                    info["lens_ok"] = False
+                    while time.monotonic() - t_cmd < settle:
+                        frame = fresh_frame()
+                        lens_meta = getattr(camera, "last_fresh_lens", None)
+                        if lens_meta is not None and abs(lens_meta - pos) <= tolerance:
+                            info["lens_ok"] = True
+                            break
+            info["lens_meta"] = lens_meta
+            info["waited_ms"] = int((time.monotonic() - t_cmd) * 1000)
+            frames = [frame, fresh_frame()]  # best of two: see the spread check in measure()
+            values = [float(preview_sharpness(f, roi=roi)) for f in frames]
+            exposure = getattr(camera, "last_fresh_meta", None) or {}
+            info.update(exposure_us=exposure.get("exposure_us"), gain=exposure.get("analogue_gain"))
+            top = max(values)
+            spread = (min(values) / top) if top > 0 else None
+            return top, spread, info
+
+        async def measure(pos: float, *, full_settle: bool = False) -> float:
             pos = clamp(pos)
             await asyncio.to_thread(setter, pos)
-            await asyncio.sleep(settle)
-            if callable(fresh_frame):
-                # Frames exposed after the settle time, never ones queued before the lens arrived.
-                # Best of two: a frame blurred by a moving hand reads far too low (logs: 6945 at
-                # 9.76 but 162 at 9.94 within one sweep) and must not decide the peak.
-                frames = [await asyncio.to_thread(fresh_frame) for _ in range(2)]
-            else:
-                for _ in range(discard):
-                    await asyncio.to_thread(camera.capture_preview_array)
-                frames = [await asyncio.to_thread(camera.capture_preview_array)]
-            pts[pos] = max(float(preview_sharpness(f, roi=roi)) for f in frames)
-            return pts[pos]
+            sharp, spread, info = await asyncio.to_thread(sample_frames, pos, full_settle)
+            pts[pos] = sharp
+            order.append(pos)
+            if info.get("lens_ok") is True:
+                stats["meta_settled"] += 1
+            elif info.get("lens_ok") is False:
+                stats["meta_timeout"] += 1
+            elif info.get("lens_meta") is None and callable(fresh_frame):
+                stats["meta_missing"] += 1
+            # Two fresh frames at the same lens position that disagree strongly mean motion (or
+            # flicker); not when the lens was still travelling (lens_ok False).
+            if spread is not None and spread < float(cfg.af_motion_spread_min) and info.get("lens_ok") is not False:
+                stats["unstable"] += 1
+            logger.info(
+                "event=focus_sample pos=%.3f sharpness=%.0f spread=%s lens_meta=%s lens_ok=%s waited_ms=%s "
+                "exposure_us=%s gain=%s",
+                pos,
+                sharp,
+                f"{spread:.2f}" if spread is not None else None,
+                f"{info['lens_meta']:.3f}" if info.get("lens_meta") is not None else None,
+                info.get("lens_ok"),
+                info.get("waited_ms"),
+                info.get("exposure_us"),
+                f"{info['gain']:.2f}" if isinstance(info.get("gain"), (int, float)) else info.get("gain"),
+            )
+            if stats["unstable"] >= int(cfg.af_motion_max_unstable):
+                raise FocusMotionError(
+                    f"Page or camera moving during focus: {stats['unstable']} samples with inconsistent "
+                    f"sharpness (spread < {cfg.af_motion_spread_min:.2f})"
+                )
+            return sharp
 
         async def climb(origin: float) -> None:
             """Coarse hill-climb from ``origin`` in `step` increments, then fine probes."""
+            moved_in_first_fine = False
             origin = clamp(origin)
             if origin not in pts:
                 await measure(origin)
@@ -319,13 +508,19 @@ class AutofocusController:
             # The peak at close range is narrower than the coarse step (0.12 dioptre changed the
             # metric 2.4x in logs), so probe both sides at smaller steps.
             best = max(pts, key=lambda p: pts[p])
-            for fine in (step * 0.4, step * 0.16):
+            for level, fine in enumerate((step * 0.4, step * 0.16)):
+                if level == 1 and adaptive and not moved_in_first_fine and self._bracketed(pts, best, 0.04):
+                    break  # the peak is already bracketed by the first fine probes: stop here
+                moved = False
                 for cand in (clamp(best + fine), clamp(best - fine)):
                     if cand in pts:
                         continue
                     await measure(cand)
                     if pts[cand] > pts[best] * 1.01:
                         best = cand
+                        moved = True
+                if level == 0:
+                    moved_in_first_fine = moved
 
         def prominent() -> bool:
             """A real focus peak is clearly above the rest of the sampled curve."""
@@ -334,16 +529,23 @@ class AutofocusController:
 
         try:
             await climb(start)
-            if self.config.af_wide_sweep and not prominent():
-                wide = float(self.config.af_wide_step)
-                pos = max(lo, float(self.config.af_wide_min))
+            if local_only:
+                best_local = max(pts, key=lambda p: pts[p])
+                if not (prominent() and self._bracketed(pts, best_local, 0.03)):
+                    raise AutofocusError(
+                        f"No bracketed focus peak around the remembered lens {start:.2f} "
+                        f"(best {best_local:.2f}, {len(pts)} samples)"
+                    )
+            elif cfg.af_wide_sweep and not prominent():
+                wide = float(cfg.af_wide_step)
+                pos = max(lo, float(cfg.af_wide_min))
                 logger.info(
                     "event=autofocus_wide_sweep reason=no_clear_peak range=%.1f..%.1f step=%.1f",
                     pos,
-                    min(hi, float(self.config.af_wide_max)),
+                    min(hi, float(cfg.af_wide_max)),
                     wide,
                 )
-                while pos <= min(hi, float(self.config.af_wide_max)) + 1e-6:
+                while pos <= min(hi, float(cfg.af_wide_max)) + 1e-6:
                     if clamp(pos) not in pts:
                         await measure(pos)
                     pos += wide
@@ -351,31 +553,54 @@ class AutofocusController:
                 if not prominent():
                     values = sorted(pts.values())
                     raise AutofocusError(
-                        f"No focus peak found over lens {self.config.af_wide_min:.0f}-"
-                        f"{self.config.af_wide_max:.0f}: sharpness {values[0]:.0f}..{values[-1]:.0f} "
+                        f"No focus peak found over lens {cfg.af_wide_min:.0f}-"
+                        f"{cfg.af_wide_max:.0f}: sharpness {values[0]:.0f}..{values[-1]:.0f} "
                         f"(document blank, too far/near, or moving)"
                     )
 
             best = max(pts, key=lambda p: pts[p])
-            # Park on the winner and confirm with a fresh reading: the last measured position
-            # is rarely the best one, and the lens needs time to get there.
-            claimed = pts[best]
-            await measure(best)
-            if pts[best] < 0.6 * claimed:
-                # The same lens position now reads far softer than when it won: the page moved
-                # (or the earlier reading was stale), so this focus cannot be trusted.
-                raise AutofocusError(
-                    f"Focus unstable at lens {best:.2f}: sharpness {claimed:.0f} then {pts[best]:.0f} "
-                    f"(document moved?)"
-                )
+            clean = adaptive and self._clean_peak(pts, best, stats["unstable"])
+            if clean and order[-1] == best:
+                confirm = "skipped_clean_last"  # the freshest reading is at the winner already
+            elif clean:
+                # Clean, bracketed peak: put the lens on it and wait for it to settle (metadata
+                # settle: ~0.2 s) but skip the "reading collapsed" check. The lens must be at rest
+                # before the outline is re-measured for the pre-capture motion check.
+                await measure(best)
+                confirm = "settled_clean"
+            else:
+                # Park on the winner and confirm with a fresh reading at the full settle time.
+                claimed = pts[best]
+                await measure(best, full_settle=True)
+                confirm = "measured"
+                if pts[best] < 0.6 * claimed:
+                    # The same lens position now reads far softer than when it won: the page moved
+                    # (or the earlier reading was stale), so this focus cannot be trusted.
+                    raise AutofocusError(
+                        f"Focus unstable at lens {best:.2f}: sharpness {claimed:.0f} then {pts[best]:.0f} "
+                        f"(document moved?)"
+                    )
+            settle_mode = "metadata" if cfg.af_settle_by_metadata and callable(fresh_frame) else "fixed"
+            self.last_refine_stats = {
+                "refine_ms": (time.monotonic() - t_refine) * 1000,
+                "samples": len(order),
+                "settle": settle_mode,
+                "confirm": confirm,
+                "unstable": stats["unstable"],
+            }
             logger.info(
                 "event=autofocus_refined start=%.2f final=%.2f sharpness_start=%.1f sharpness_final=%.1f "
-                "samples=%d curve=%s",
+                "samples=%d path=%s confirm=%s meta_settled=%d meta_timeout=%d meta_missing=%d curve=%s",
                 start,
                 best,
                 start_sharpness,
                 pts[best],
-                len(pts),
+                len(order),
+                "local" if local_only else "full",
+                confirm,
+                stats["meta_settled"],
+                stats["meta_timeout"],
+                stats["meta_missing"],
                 ",".join(f"{p:.2f}:{v:.0f}" for p, v in sorted(pts.items())),
             )
             return float(best), float(pts[best])

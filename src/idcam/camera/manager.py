@@ -157,6 +157,8 @@ class CameraManager:
         self._held_lens: float | None = None
         # LensPosition reported in the metadata of the last frame from capture_fresh_preview_array.
         self.last_fresh_lens: float | None = None
+        # Exposure details of that frame (None entries = the metadata field was not reported).
+        self.last_fresh_meta: dict[str, Any] = {}
 
     @property
     def is_mock(self) -> bool:
@@ -273,6 +275,11 @@ class CameraManager:
                             native = np.array(request.make_array("main"))
                             lens = meta.get("LensPosition")
                             self.last_fresh_lens = float(lens) if lens is not None else None
+                            self.last_fresh_meta = {
+                                "exposure_us": meta.get("ExposureTime"),
+                                "analogue_gain": meta.get("AnalogueGain"),
+                                "frame_age_ms": int((stamp - t0) / 1e6) if stamp is not None else None,
+                            }
                     finally:
                         request.release()
             except CameraError:
@@ -292,6 +299,8 @@ class CameraManager:
 
             assert self._picam2 is not None
             lens_position = self._held_lens if self._held_lens is not None else self._read_lens_position()
+            t_begin = time.monotonic()
+            timings: dict[str, Any] = {}
             try:
                 self._picam2.stop()
                 self._picam2.configure(self._still_config)
@@ -306,6 +315,7 @@ class CameraManager:
                     )
                 self._picam2.start()
                 ready_ns = _boottime_ns()
+                timings["reconfigure_ms"] = int((time.monotonic() - t_begin) * 1000)
                 if lens_position is not None:
                     self._set_controls_unlocked(
                         {
@@ -317,10 +327,13 @@ class CameraManager:
                         "event=autofocus_result method=hold_lens_position lens_position=%s",
                         lens_position,
                     )
-                if not self._save_fresh_still(path, ready_ns):
+                if not self._save_fresh_still(path, ready_ns, timings):
+                    t_fallback = time.monotonic()
                     self._picam2.capture_file(str(path), format="jpeg")
+                    timings["fallback_capture_file_ms"] = int((time.monotonic() - t_fallback) * 1000)
             finally:
                 try:
+                    t_restore = time.monotonic()
                     self._picam2.stop()
                     self._picam2.configure(self._preview_config)
                     self._picam2.start()
@@ -328,11 +341,23 @@ class CameraManager:
                         self._enable_preview_autofocus(wait=False)
                     except Exception as exc:
                         logger.warning("event=autofocus_preview_failed error=%s", exc)
+                    timings["restore_preview_ms"] = int((time.monotonic() - t_restore) * 1000)
+                    # Which part of the ~2.4 s still capture is where (all monotonic, measured here).
+                    logger.info(
+                        "event=still_timing reconfigure_ms=%s frame_wait_ms=%s encode_ms=%s fallback_ms=%s "
+                        "restore_preview_ms=%s total_ms=%d",
+                        timings.get("reconfigure_ms"),
+                        timings.get("frame_wait_ms"),
+                        timings.get("encode_ms"),
+                        timings.get("fallback_capture_file_ms"),
+                        timings.get("restore_preview_ms"),
+                        int((time.monotonic() - t_begin) * 1000),
+                    )
                 except Exception as exc:
                     logger.error("Failed to restore preview mode: %s", exc)
                     raise CameraError(f"Failed to restore preview after capture: {exc}") from exc
 
-    def _save_fresh_still(self, path: Path, ready_ns: int | None) -> bool:
+    def _save_fresh_still(self, path: Path, ready_ns: int | None, timings: dict[str, Any] | None = None) -> bool:
         """Save the first still exposed after the lens had ``still_lens_settle_sec`` to arrive.
 
         Returns False when the request API is unavailable, so the caller falls back to
@@ -341,7 +366,8 @@ class CameraManager:
         if ready_ns is None or self._picam2 is None:
             return False
         settle_ns = int(float(self.config.still_lens_settle_sec) * 1e9)
-        deadline = time.monotonic() + 8.0 + float(self.config.still_lens_settle_sec)
+        t_wait = time.monotonic()
+        deadline = t_wait + 8.0 + float(self.config.still_lens_settle_sec)
         try:
             while True:
                 request = self._picam2.capture_request()
@@ -349,7 +375,11 @@ class CameraManager:
                     meta = request.get_metadata()
                     stamp = meta.get("SensorTimestamp")
                     if stamp is None or stamp >= ready_ns + settle_ns or time.monotonic() >= deadline:
+                        t_save = time.monotonic()
                         request.save("main", str(path), format="jpeg")
+                        if timings is not None:
+                            timings["frame_wait_ms"] = int((t_save - t_wait) * 1000)
+                            timings["encode_ms"] = int((time.monotonic() - t_save) * 1000)
                         logger.info(
                             "event=still_capture_metadata exposure_us=%s analogue_gain=%s lens_position=%s "
                             "frame_age_ms=%s",

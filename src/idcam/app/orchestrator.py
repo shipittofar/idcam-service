@@ -24,6 +24,7 @@ from idcam.exceptions import (
     CameraError,
     CameraUnavailableError,
     CaptureError,
+    FocusMotionError,
     ImageValidationError,
     NetworkError,
     ProtocolError,
@@ -120,6 +121,15 @@ class ApplicationOrchestrator:
         self._consecutive_failures = 0
         self._presence_misses = 0
         self._motion_retries = 0
+        self._last_focus_lens: float | None = None
+        # (state name, monotonic time) marks of the active transaction, for the timing summary.
+        self._txn_marks: list[tuple[str, float]] = []
+        self._txn_detect_latency_ms = 0
+        self._txn_validated_ms: int | None = None
+        self._loop_window_start = time.monotonic()
+        self._loop_ticks = 0
+        self._loop_tick_ms = 0.0
+        self._loop_tick_max_ms = 0.0
         self._upload_crop_roi: tuple[int, int, int, int] | None = None
         self._background: set[asyncio.Task] = set()
         self._last_scene_empty = False
@@ -248,6 +258,12 @@ class ApplicationOrchestrator:
                 await self._handle_watchdog(alert)
             elif not await self._handle_state_timeout():
                 await self._dispatch_state_tick()
+
+            tick_ms = (time.monotonic() - started) * 1000.0
+            self._loop_ticks += 1
+            self._loop_tick_ms += tick_ms
+            self._loop_tick_max_ms = max(self._loop_tick_max_ms, tick_ms)
+            self._log_loop_stats(frame_interval)
 
             # Fixed-rate loop: the old unconditional sleep(frame_interval) came on top of the
             # tick's own work (~0.2 s + 0.5 s detection per step). Sleep only the remainder,
@@ -428,9 +444,10 @@ class ApplicationOrchestrator:
             self._clear_scene_count = 0
         if detected:
             logger.info(
-                "event=document_detected motion=%.2f edge_density=%.4f",
+                "event=document_detected motion=%.2f edge_density=%.4f latency_ms=%d",
                 self.detector.last_motion,
                 self.detector.last_edge_density,
+                self.detector.detection_latency_ms,
             )
             logger.info("event=pipeline_stage stage=document_detected")
             self.stability.reset()
@@ -478,6 +495,10 @@ class ApplicationOrchestrator:
         self._upload_result = ""
         self._presence_misses = 0
         self._motion_retries = 0
+        self._last_focus_lens = None
+        self._txn_marks = [("DETECTED", time.monotonic())]
+        self._txn_detect_latency_ms = self.detector.detection_latency_ms
+        self._txn_validated_ms = None
         self._upload_crop_roi = None
         set_log_context(capture_id=txn.capture_id)
         logger.info("event=transaction_started capture_id=%s trigger=%s", txn.capture_id, trigger)
@@ -604,6 +625,7 @@ class ApplicationOrchestrator:
             return False
         logger.warning("event=document_lost state=%s frames=%d", self.sm.state.value, self._presence_misses)
         self._presence_misses = 0
+        self._log_timing_summary("document_removed")
         self._abort_transaction("document_removed")
         self._clear_transaction()
         self._transition(AppState.IDLE, reason="document_removed_before_capture")
@@ -654,6 +676,7 @@ class ApplicationOrchestrator:
                 preview_roi=preview_roi,
             )
             self._transaction.mark_focus_completed(result.sharpness, result.min_required_sharpness)
+            self._last_focus_lens = result.lens_after
             self.sm.touch_progress()
             logger.info(
                 "event=pipeline_stage stage=focus_verified method=%s sharpness=%.1f ratio=%.2f",
@@ -665,8 +688,20 @@ class ApplicationOrchestrator:
             if settled is not None:
                 await asyncio.to_thread(self.detector.rebaseline_motion, settled)
             self._transition(AppState.CAPTURING, reason="focus_verified")
+        except FocusMotionError as exc:
+            # The page or camera moved while focusing: not a failure, wait for it to settle again.
+            logger.warning("event=focus_motion %s", exc)
+            self._motion_retries += 1
+            if self._motion_retries <= self.MAX_MOTION_RESTABILIZE:
+                self.stability.reset()
+                self.stability.set_roi(self.detector.lock.roi)
+                self._transition(AppState.WAITING_FOR_STABILITY, reason="moved_during_focus")
+                return
+            self.autofocus.forget_lens("focus_motion")
+            await self._fail_transaction_and_wait("focus_failed", str(exc))
         except AutofocusError as exc:
             logger.error("event=autofocus_failed %s", exc)
+            self.autofocus.forget_lens("focus_failed")
             await self._fail_transaction_and_wait("focus_failed", str(exc))
 
     async def _focus_verification_tick(self) -> None:
@@ -765,9 +800,15 @@ class ApplicationOrchestrator:
                 result.file_bytes,
             )
             self.sm.touch_progress()
+            self.autofocus.remember_lens(self._last_focus_lens)  # a validated lens position
+            if self._txn_marks:
+                self._txn_validated_ms = int(
+                    (time.monotonic() - self._txn_marks[0][1]) * 1000 + self._txn_detect_latency_ms
+                )
             self._transition(AppState.UPLOADING)
         except ImageValidationError as exc:
             logger.error("event=image_validation_failed %s", exc)
+            self.autofocus.forget_lens("image_invalid")
             self._keep_rejected_for_debug(self._capture_path)
             self.temp_store.cleanup(self._capture_path)
             await self._fail_transaction_and_wait("image_invalid", str(exc))
@@ -884,6 +925,7 @@ class ApplicationOrchestrator:
             self._transaction.mark_completed()
             self.temp_store.cleanup(self._capture_path)
             logger.info("event=pipeline_stage stage=success capture_id=%s", self._transaction.capture_id)
+            self._log_timing_summary("success")
             self._finish_manual_request(
                 {
                     "ok": True,
@@ -938,10 +980,12 @@ class ApplicationOrchestrator:
 
         if self._removal_count >= self.config.detection.removal_frames_required:
             logger.info(
-                "event=document_removed reason=scene_empty consecutive_frames=%d motion=%.2f edge_density=%.4f",
+                "event=document_removed reason=scene_empty consecutive_frames=%d motion=%.2f edge_density=%.4f "
+                "waited_ms=%d",
                 self._removal_count,
                 self.detector.last_motion,
                 self.detector.last_edge_density,
+                int(self.sm.elapsed() * 1000),
             )
             self._clear_transaction()
             self.detector.reset_baseline()
@@ -1040,6 +1084,65 @@ class ApplicationOrchestrator:
         self._state_action_claimed = None
         self._transition(AppState.RECOVERY, reason=reason)
 
+    # state name -> field of the timing summary (sums when a state repeats, e.g. re-stabilizing)
+    _SUMMARY_FIELDS = {
+        "DOCUMENT_DETECTED": "lock_ms",
+        "WAITING_FOR_STABILITY": "stability_ms",
+        "FOCUSING": "focus_ms",
+        "CAPTURING": "capture_ms",
+        "IMAGE_VALIDATION": "validation_ms",
+        "UPLOADING": "upload_ms",  # includes preparing the smaller upload copy
+        "WAITING_FOR_SERVER": "response_ms",
+        "PROCESSING_RESPONSE": "response_ms",
+    }
+
+    def _log_timing_summary(self, outcome: str) -> None:
+        """One line per transaction with the time spent in each stage (monotonic clock)."""
+        marks = self._txn_marks
+        if not marks:
+            return
+        now = time.monotonic()
+        fields: dict[str, int] = {}
+        for (name, start), nxt in zip(marks, [m[1] for m in marks[1:]] + [now]):
+            field = self._SUMMARY_FIELDS.get(name)
+            if field:
+                fields[field] = fields.get(field, 0) + round((nxt - start) * 1000)
+        total_ms = round((now - marks[0][1]) * 1000)
+        logger.info(
+            "event=timing_summary outcome=%s detect_ms=%d %s total_ms=%d end_to_end_ms=%d "
+            "detect_to_validated_ms=%s",
+            outcome,
+            self._txn_detect_latency_ms,
+            " ".join(f"{key}={value}" for key, value in fields.items()),
+            total_ms,
+            total_ms + self._txn_detect_latency_ms,
+            self._txn_validated_ms,
+        )
+        self._txn_marks = []
+
+    def _log_loop_stats(self, target_interval: float) -> None:
+        """Every 60 s: how fast the main loop really runs (CPU / frame delivery check)."""
+        now = time.monotonic()
+        window = now - self._loop_window_start
+        if window < 60.0:
+            return
+        if self._loop_ticks:
+            logger.info(
+                "event=loop_stats window_s=%.0f ticks=%d achieved_fps=%.2f target_fps=%.1f avg_tick_ms=%.0f "
+                "max_tick_ms=%.0f state=%s",
+                window,
+                self._loop_ticks,
+                self._loop_ticks / window,
+                1.0 / target_interval if target_interval > 0 else 0.0,
+                self._loop_tick_ms / self._loop_ticks,
+                self._loop_tick_max_ms,
+                self.sm.state.value,
+            )
+        self._loop_window_start = now
+        self._loop_ticks = 0
+        self._loop_tick_ms = 0.0
+        self._loop_tick_max_ms = 0.0
+
     def _abort_transaction(self, reason: str) -> None:
         if self._transaction and not self._transaction.is_terminal:
             self._transaction.mark_failed(reason)
@@ -1056,6 +1159,7 @@ class ApplicationOrchestrator:
 
     async def _fail_transaction_and_wait(self, failure_key: str, detail: str) -> None:
         self._consecutive_failures += 1
+        self._log_timing_summary(f"failed:{failure_key}")
         if self._transaction:
             self._transaction.mark_failed(detail)
         self.health.record_failure(detail)
@@ -1145,6 +1249,8 @@ class ApplicationOrchestrator:
         prev = self.sm.state
         self._last_transition_reason = reason or f"{prev.value}->{target.value}"
         self.sm.transition(target, reason=reason)
+        if self._txn_marks:
+            self._txn_marks.append((target.value, time.monotonic()))
         self._state_action_claimed = None
         if target != AppState.ERROR:
             self._error_backoff_claimed = False

@@ -281,6 +281,7 @@ Hardware tests are skipped off-device. Run the full suite after installer change
 - [Architecture](docs/ARCHITECTURE.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Security](docs/SECURITY.md)
+- [Performance and timing](docs/PERFORMANCE.md): where the time goes, focus speed settings, how to measure (`scripts/timing_report.py`)
 - [Codebase audit report](ID_CAM_AUDIT_REPORT.md): architecture, upload contents, performance bottlenecks and a prioritised fix list
 
 ## License

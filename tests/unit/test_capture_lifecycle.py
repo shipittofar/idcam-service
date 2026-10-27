@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -424,3 +425,162 @@ class TestLedGuidanceInFlow:
         for _ in range(12):  # the detector releases its latch after a few empty frames
             await orch._idle_tick()
         assert orch.led._hint is None  # removed: back to the ready colour
+
+
+class TestFocusAndTimingIntegration:
+    @pytest.mark.asyncio
+    async def test_page_moving_during_focus_waits_for_stability_without_a_failure(self, app_config):
+        from idcam.exceptions import FocusMotionError
+
+        orch = _orch(app_config)
+        orch.sm.state = AppState.FOCUSING
+        orch._begin_transaction(trigger="auto")
+        orch.detector.lock_document(_document_frame(), allow_fallback=True)
+        orch._safe_preview = AsyncMock(return_value=_document_frame())
+        orch.detector.is_scene_empty = MagicMock(return_value=False)
+        orch.autofocus.run_autofocus = AsyncMock(side_effect=FocusMotionError("moving"))
+
+        await orch._focusing_tick()
+
+        assert orch.sm.state == AppState.WAITING_FOR_STABILITY
+        assert orch._consecutive_failures == 0
+        assert orch._transaction is not None
+
+    @pytest.mark.asyncio
+    async def test_persistent_motion_during_focus_eventually_fails_and_drops_the_lens_memory(self, app_config):
+        from idcam.exceptions import FocusMotionError
+
+        orch = _orch(app_config)
+        orch.autofocus.remember_lens(8.4)
+        orch.sm.state = AppState.FOCUSING
+        orch._begin_transaction(trigger="auto")
+        orch._motion_retries = orch.MAX_MOTION_RESTABILIZE
+        orch.detector.lock_document(_document_frame(), allow_fallback=True)
+        orch._safe_preview = AsyncMock(return_value=_document_frame())
+        orch.detector.is_scene_empty = MagicMock(return_value=False)
+        orch.autofocus.run_autofocus = AsyncMock(side_effect=FocusMotionError("moving"))
+
+        await orch._focusing_tick()
+
+        assert orch.sm.state == AppState.IDLE
+        assert orch._consecutive_failures == 1
+        assert orch.autofocus.remembered_lens is None
+
+    @pytest.mark.asyncio
+    async def test_focus_failure_drops_the_remembered_lens(self, app_config):
+        from idcam.exceptions import AutofocusError
+
+        orch = _orch(app_config)
+        orch.autofocus.remember_lens(8.4)
+        orch.sm.state = AppState.FOCUSING
+        orch._begin_transaction(trigger="auto")
+        orch.detector.lock_document(_document_frame(), allow_fallback=True)
+        orch._safe_preview = AsyncMock(return_value=_document_frame())
+        orch.detector.is_scene_empty = MagicMock(return_value=False)
+        orch.autofocus.run_autofocus = AsyncMock(side_effect=AutofocusError("no peak"))
+
+        await orch._focusing_tick()
+
+        assert orch.autofocus.remembered_lens is None
+
+    @pytest.mark.asyncio
+    async def test_validated_capture_remembers_its_lens_and_a_rejected_one_forgets_it(self, app_config, tmp_path):
+        from idcam.exceptions import ImageValidationError
+
+        orch = _orch(app_config)
+        orch.sm.state = AppState.IMAGE_VALIDATION
+        orch._begin_transaction(trigger="auto")
+        orch._capture_path = tmp_path / "c.jpg"
+        orch._capture_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 500)
+        orch._last_focus_lens = 8.42
+        orch.validator.validate = MagicMock(
+            return_value=MagicMock(file_bytes=500, width=100, height=80, sha256="ab", sharpness=90.0)
+        )
+
+        await orch._validation_tick()
+
+        assert orch.sm.state == AppState.UPLOADING
+        assert orch.autofocus.remembered_lens == 8.42
+        assert orch._txn_validated_ms is not None
+
+        orch2 = _orch(app_config)
+        orch2.autofocus.remember_lens(8.42)
+        orch2.sm.state = AppState.IMAGE_VALIDATION
+        orch2._begin_transaction(trigger="auto")
+        orch2._capture_path = tmp_path / "d.jpg"
+        orch2._capture_path.write_bytes(b"\xff\xd8\xff" + b"\x00" * 500)
+        orch2.validator.validate = MagicMock(side_effect=ImageValidationError("blurry"))
+
+        await orch2._validation_tick()
+
+        assert orch2.autofocus.remembered_lens is None
+
+    def test_timing_summary_reports_each_stage_from_a_monotonic_clock(self, app_config, caplog):
+        orch = _orch(app_config)
+        orch._txn_marks = [
+            ("DETECTED", 100.0),
+            ("DOCUMENT_DETECTED", 100.0),
+            ("WAITING_FOR_STABILITY", 100.05),
+            ("FOCUSING", 101.75),
+            ("CAPTURING", 108.2),
+            ("IMAGE_VALIDATION", 110.6),
+            ("UPLOADING", 111.2),
+        ]
+        orch._txn_detect_latency_ms = 700
+        orch._txn_validated_ms = 11300
+
+        with caplog.at_level("INFO"), patch("idcam.app.orchestrator.time.monotonic", return_value=112.0):
+            orch._log_timing_summary("success")
+
+        line = next(r.getMessage() for r in caplog.records if "event=timing_summary" in r.getMessage())
+        for expected in (
+            "outcome=success",
+            "detect_ms=700",
+            "stability_ms=1700",
+            "focus_ms=6450",
+            "capture_ms=2400",
+            "validation_ms=600",
+            "upload_ms=800",
+            "total_ms=12000",
+            "end_to_end_ms=12700",
+            "detect_to_validated_ms=11300",
+        ):
+            assert expected in line, expected
+        assert orch._txn_marks == []  # logged once per transaction
+
+    def test_timing_summary_without_a_transaction_logs_nothing(self, app_config, caplog):
+        orch = _orch(app_config)
+        with caplog.at_level("INFO"):
+            orch._log_timing_summary("success")
+        assert "timing_summary" not in caplog.text
+
+    def test_detector_measures_how_long_a_document_took_to_be_detected(self):
+        from idcam.config.schema import DetectionConfig
+        from idcam.vision.document_detector import DocumentDetector
+
+        det = DocumentDetector(DetectionConfig(min_geometry_confidence=0.25, detect_frames_required=2))
+        assert det.detection_latency_ms == 0
+        det.detect(_document_frame())
+        assert det._first_seen_at is not None
+        assert det.detection_latency_ms >= 0
+        det.detect(_empty_frame())
+        assert det.detection_latency_ms == 0
+
+    def test_loop_stats_are_logged_once_a_minute_and_reset(self, app_config, caplog):
+        orch = _orch(app_config)
+        orch._loop_window_start = time.monotonic() - 61.0
+        orch._loop_ticks = 300
+        orch._loop_tick_ms = 300 * 90.0
+        orch._loop_tick_max_ms = 400.0
+
+        with caplog.at_level("INFO"):
+            orch._log_loop_stats(0.2)
+
+        line = next(r.getMessage() for r in caplog.records if "event=loop_stats" in r.getMessage())
+        assert "avg_tick_ms=90" in line and "max_tick_ms=400" in line and "target_fps=5.0" in line
+        assert orch._loop_ticks == 0
+
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            orch._log_loop_stats(0.2)  # inside the new window: silent
+        assert "loop_stats" not in caplog.text

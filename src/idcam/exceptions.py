@@ -31,6 +31,10 @@ class AutofocusError(CameraError):
     recoverable = True
 
 
+class FocusMotionError(AutofocusError):
+    """The page or camera moved while focusing: wait for it to settle instead of failing."""
+
+
 class CaptureError(CameraError):
     """Image capture failed."""
 
