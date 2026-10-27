@@ -389,3 +389,41 @@ class TestGuidanceColours:
         led.set_remove_hint(True)
         led.flash_failure(5.0)
         assert led.current_color() == RED
+
+
+def test_strip_that_is_not_ready_at_boot_is_picked_up_later(monkeypatch):
+    """Service starts before /dev/pio0 is usable: keep retrying instead of staying dark."""
+    backend = FakeBackend()
+    attempts = {"n": 0}
+
+    def flaky(_config):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise PermissionError("/dev/pio0")
+        return backend
+
+    monkeypatch.setattr(led_mod, "Pi5NeopixelBackend", flaky)
+    monkeypatch.setattr(led_mod, "CONNECT_RETRY_SEC", 0.02)
+    indicator = LedIndicator(LedConfig(enabled=True))
+    indicator.start()
+    assert not indicator.active  # first attempt failed
+    indicator.set_state(AppState.IDLE)
+    try:
+        assert _wait_for(lambda: indicator.active, timeout=2.0)
+        assert _wait_for(lambda: WHITE in backend.shown, timeout=2.0)
+    finally:
+        indicator.stop()
+    assert attempts["n"] == 3
+
+
+def test_stop_ends_the_retry_loop_promptly(monkeypatch):
+    def never(_config):
+        raise PermissionError("/dev/pio0")
+
+    monkeypatch.setattr(led_mod, "Pi5NeopixelBackend", never)
+    monkeypatch.setattr(led_mod, "CONNECT_RETRY_SEC", 30.0)
+    indicator = LedIndicator(LedConfig(enabled=True))
+    indicator.start()
+    started = time.monotonic()
+    indicator.stop()
+    assert time.monotonic() - started < 1.5

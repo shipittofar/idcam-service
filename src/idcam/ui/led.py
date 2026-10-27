@@ -33,6 +33,10 @@ GREEN: Color = (0, 255, 0)
 RED: Color = (255, 0, 0)
 
 FRAME_INTERVAL_SEC = 0.05
+# At boot the service can start before /dev/pio0 (RP1 PIO) or its permissions exist, and the
+# first attempt then failed for good, leaving the strip dark until the next restart.
+CONNECT_RETRY_SEC = 5.0
+CONNECT_MAX_ATTEMPTS = 120  # ~10 minutes
 
 
 @dataclass(frozen=True)
@@ -210,21 +214,48 @@ class LedIndicator:
     def start(self) -> None:
         if not self.config.enabled or self._thread is not None:
             return
+        self._stop.clear()
         if self._backend is None:
             try:
                 self._backend = Pi5NeopixelBackend(self.config)
             except Exception as exc:
-                logger.warning("event=led_unavailable error=%s", exc)
+                logger.warning(
+                    "event=led_unavailable error=%s retrying_every_sec=%.0f gpio=%d",
+                    exc,
+                    CONNECT_RETRY_SEC,
+                    self.config.gpio_pin,
+                )
+                self._thread = threading.Thread(target=self._connect_then_run, name="idcam-led", daemon=True)
+                self._thread.start()
                 return
-        self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="idcam-led", daemon=True)
         self._thread.start()
+        self._log_started()
+
+    def _log_started(self, attempt: int | None = None) -> None:
         logger.info(
-            "event=led_started gpio=%d count=%d brightness=%.2f",
+            "event=led_started gpio=%d count=%d brightness=%.2f%s",
             self.config.gpio_pin,
             self.config.count,
             self.config.brightness,
+            f" after_attempts={attempt}" if attempt else "",
         )
+
+    def _connect_then_run(self) -> None:
+        """Keep trying to open the strip (hardware not ready yet at boot), then drive it."""
+        for attempt in range(2, CONNECT_MAX_ATTEMPTS + 2):
+            if self._stop.wait(CONNECT_RETRY_SEC):
+                return
+            try:
+                self._backend = Pi5NeopixelBackend(self.config)
+            except Exception as exc:
+                if attempt % 12 == 0:
+                    logger.warning("event=led_still_unavailable attempts=%d error=%s", attempt, exc)
+                continue
+            self._log_started(attempt)
+            self._run()
+            return
+        logger.warning("event=led_gave_up attempts=%d", CONNECT_MAX_ATTEMPTS + 1)
 
     def set_state(self, state: AppState) -> None:
         pattern = self._patterns.get(state, FAULT)
