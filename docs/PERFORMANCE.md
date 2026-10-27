@@ -34,11 +34,12 @@ Upload preparation and upload were not reliably measured.
 
 | Change | Effect | Quality safeguard |
 |---|---|---|
-| **Lens memory** (`af_lens_memory`) | After a capture passes validation its lens position is remembered; the next document starts a *bounded local* search there and skips the hardware AF cycle (≈ 1–1.5 s) | The local search must find a clearly bracketed peak, otherwise memory is dropped and the full procedure (hardware AF, refinement, wide sweep) runs. Memory is cleared on any focus failure, rejected image or motion abort, and after `af_memory_max_age_sec` |
+| **Lens memory** (`af_lens_memory`) | The **last successful focus** (remembered as soon as a focus completes) is the starting point of the next document: a local search from that lens position, no hardware AF cycle and no wide sweep. Typically 3-4 samples instead of 8-9 plus AF | Small step (`af_local_step`, 0.25 dioptre) around the remembered position; the centre must be a bracketed peak *and* reach at least `af_local_min_ratio` (70 %) of the live preview's sharpness, otherwise the memory is dropped and the full procedure (hardware AF, refinement, wide sweep) runs. Cleared when the image taken with it is rejected, on focus failure or motion abort, and after `af_memory_max_age_sec` (6 h) |
 | **Metadata settle** (`af_settle_by_metadata`) | Waits until the frame's `LensPosition` is within `af_settle_tolerance` of the command, at least `af_refine_min_settle_sec`, at most `af_refine_settle_sec` (the old fixed delay) | Frames are always *fresh* (exposed after the wait). Never waits longer than before; if the camera reports no metadata the old fixed wait applies. **Needs on-device validation** (see below) |
 | **Adaptive refinement** (`af_adaptive`) | Skips the finest probe when the peak is already bracketed after the first fine probes, and skips the confirming re-measurement for a clean unimodal peak | Both skips require: a single peak, both neighbours ≥ 4 % lower, no motion hints. Noisy, bimodal or edge-of-range curves keep every stage and the confirmation |
 | **One hardware AF pass** | When the lens search follows, a second hardware pass is not run just because the first result was not "accepted" | The search starts from the AF result either way; failure paths unchanged |
 | **Motion detection** | Two fresh frames at the same lens position that differ by more than `af_motion_spread_min` mean motion; `af_motion_max_unstable` such samples abort focusing as `FocusMotionError` | The orchestrator returns to *waiting for stability* (up to `MAX_MOTION_RESTABILIZE` times) instead of continuing a 10 s sweep on a moving page |
+| **Stability sensitivity** (`detection.stability_sensitivity`, default 0.6) | The motion thresholds of the stability wait and of the pre-capture check are divided by it: 0.6 tolerates ≈ 67 % more movement (a 40 % cut in sensitivity); 1.0 restores the old behaviour | A page still moving by more than the relaxed threshold (13.3 instead of 8 with the default `motion_threshold`) still resets stability; the still is validated independently |
 | **Timing instrumentation** | `timing_summary`, `focus_timing`, `focus_sample`, `still_timing`, `loop_stats`, detection latency, removal wait | Log-only |
 
 Not changed on purpose: capture resolution (64 MP), JPEG settings, sharpness thresholds, LED
@@ -47,8 +48,9 @@ brightness (0.2), detection defaults. See "Experimental profile".
 ## Autofocus decision logic
 
 1. Prepare: fresh frame, set the AF window on the document (≈ 0.3 s).
-2. If a validated lens position is remembered (and fresh): local search from it (≤ 5 samples). Peak
-   bracketed and prominent ⇒ done (`path=memory`). Otherwise forget the memory and continue.
+2. If a successful focus is remembered (and fresh): local search from it (step 0.25, ≤ 5 samples,
+   no fine probes). Centre bracketed by lower neighbours and ≥ 70 % of the live preview sharpness ⇒
+   done (`path=memory`). Otherwise forget the memory and continue.
 3. Hardware AF once → measure.
 4. Lens search from that result: coarse climb → first fine probes → second fine probes **only if**
    the peak is not yet bracketed → if the curve has no prominent peak, the wide sweep (unchanged).
@@ -56,7 +58,8 @@ brightness (0.2), detection defaults. See "Experimental profile".
    peak elsewhere: lens moved to it and allowed to settle with the metadata wait, no collapse
    check) or *measured* at the full settle time with the "reading collapsed ⇒ unstable" check
    (all other cases). The lens is always at rest before the pre-capture motion baseline is taken.
-6. After validation the lens is remembered; any failure forgets it.
+6. The lens is remembered at every successful focus; a rejected image, a focus failure or motion
+   abort forgets it.
 
 ## Instrumentation (all monotonic clock)
 
@@ -118,7 +121,8 @@ Change one group at a time (e.g. first only the detection group) so effects can 
 
 ## Rollback
 
-* Behaviour switches (no code change): `af_adaptive: false`, `af_lens_memory: false`,
+* Behaviour switches (no code change): `stability_sensitivity: 1.0` (old motion tolerance),
+  `af_adaptive: false`, `af_lens_memory: false`,
   `af_settle_by_metadata: false`, `af_motion_max_unstable: 20` restore the previous focusing
   behaviour (all stages, hardware AF retries, fixed settle, no motion abort).
 * Full: `git revert` the commit, or `git checkout 1eef471` in the project folder and restart

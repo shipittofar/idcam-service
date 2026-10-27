@@ -69,7 +69,7 @@ class StabilityDetector:
         self._last_motion = motion
         self._prev_norm = norm
 
-        enter = self.config.motion_threshold
+        enter = self.effective_motion_threshold
         exit_threshold = enter * self.config.stability_exit_factor
 
         if motion < enter:
@@ -86,13 +86,18 @@ class StabilityDetector:
         return self._stable_latched
 
     @property
+    def effective_motion_threshold(self) -> float:
+        """Motion below this counts as still: the base threshold relaxed by the sensitivity setting."""
+        return self.config.motion_threshold / self.config.stability_sensitivity
+
+    @property
     def stable_count(self) -> int:
         return self._stable_count
 
     def debug_info(self) -> StabilityDebug:
         return StabilityDebug(
             motion=self._last_motion,
-            threshold=self.config.motion_threshold,
+            threshold=self.effective_motion_threshold,
             stable_count=self._stable_count,
             stable_frames_required=self.config.stable_frames_required,
             stable=self._stable_latched,

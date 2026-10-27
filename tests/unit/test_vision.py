@@ -167,8 +167,7 @@ class TestStabilityDetector:
         frame = np.full((480, 640, 3), 128, dtype=np.uint8)
         for _ in range(2):
             sd.update(frame)
-        moving = frame.copy()
-        moving[100:400, 100:500] = 255
+        moving = np.random.default_rng(0).integers(0, 255, frame.shape, dtype=np.uint8)  # clearly different scene
         sd.update(moving)
         assert sd.stable_count == 0
 
@@ -181,7 +180,8 @@ class TestStabilityDetector:
         assert info.stable is True
         assert info.stable_count == sd.stable_count
         assert info.stable_frames_required == detection_config.stable_frames_required
-        assert info.threshold == detection_config.motion_threshold
+        assert info.threshold == sd.effective_motion_threshold
+        assert info.threshold == pytest.approx(detection_config.motion_threshold / detection_config.stability_sensitivity)
         assert sd.update(frame) is True
 
     def test_small_preview_noise_keeps_stable_document(self, detection_config):
@@ -289,3 +289,37 @@ class TestBlurKillsEdgeDensity:
         assert sharp > 0.15
         assert blur < sharp * 0.25
 
+
+
+class TestStabilitySensitivity:
+    """stability_sensitivity 0.6 (default) = 40 % less sensitive to page movement than 1.0."""
+
+    @staticmethod
+    def _run(sensitivity, motion):
+        from unittest.mock import patch
+
+        cfg = DetectionConfig(motion_threshold=8.0, stable_frames_required=3, stability_sensitivity=sensitivity)
+        sd = StabilityDetector(cfg)
+        frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+        with patch("idcam.vision.stability_detector.structural_motion", return_value=motion):
+            results = [sd.update(frame) for _ in range(6)]
+        return results[-1], sd
+
+    def test_default_is_forty_percent_less_sensitive(self):
+        assert DetectionConfig().stability_sensitivity == 0.6
+        _stable, sd = self._run(0.6, 0.0)
+        assert sd.effective_motion_threshold == pytest.approx(8.0 / 0.6)
+
+    def test_motion_between_the_old_and_new_threshold_no_longer_breaks_stability(self):
+        stable_new, _ = self._run(0.6, 10.0)  # 8 < 10 < 13.3
+        stable_old, _ = self._run(1.0, 10.0)
+        assert stable_new is True
+        assert stable_old is False
+
+    def test_real_movement_still_resets(self):
+        stable, sd = self._run(0.6, 14.0)  # above the relaxed threshold
+        assert stable is False and sd.stable_count == 0
+
+    def test_original_behaviour_is_available_with_sensitivity_one(self):
+        _stable, sd = self._run(1.0, 0.0)
+        assert sd.effective_motion_threshold == 8.0

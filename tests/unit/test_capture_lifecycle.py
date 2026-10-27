@@ -584,3 +584,27 @@ class TestFocusAndTimingIntegration:
         with caplog.at_level("INFO"):
             orch._log_loop_stats(0.2)  # inside the new window: silent
         assert "loop_stats" not in caplog.text
+
+
+class TestFocusMemoryWiring:
+    @pytest.mark.asyncio
+    async def test_a_successful_focus_is_remembered_immediately(self, app_config):
+        orch = _orch(app_config)
+        orch.sm.state = AppState.FOCUSING
+        orch._begin_transaction(trigger="auto")
+        orch.detector.lock_document(_document_frame(), allow_fallback=True)
+        orch._safe_preview = AsyncMock(return_value=_document_frame())
+        orch.detector.is_scene_empty = MagicMock(return_value=False)
+        orch.autofocus.run_autofocus = AsyncMock(
+            return_value=AutofocusResult(True, 90.0, 1, None, "hardware_cycle+refine", 10.0, lens_after=8.37)
+        )
+
+        await orch._focusing_tick()
+
+        assert orch.sm.state == AppState.CAPTURING
+        assert orch.autofocus.remembered_lens == 8.37
+
+    def test_pre_capture_motion_check_uses_the_relaxed_stability_threshold(self, app_config):
+        orch = _orch(app_config)
+        base = app_config.detection.motion_threshold
+        assert orch.stability.effective_motion_threshold == pytest.approx(base / 0.6)

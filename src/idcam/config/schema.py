@@ -88,7 +88,11 @@ class CameraConfig(BaseModel):
     # Start from the lens position of the last validated capture (bounded local search); fall back
     # to hardware AF + the full search when no clear peak is found around it.
     af_lens_memory: bool = True
-    af_memory_max_age_sec: float = Field(1800.0, gt=0, le=86400)
+    af_memory_max_age_sec: float = Field(21600.0, gt=0, le=604800)  # 6 h
+    # Search from the remembered lens position: step (dioptres) and the smallest fraction of the
+    # live (continuous-AF) preview sharpness the local result must reach, else the full search runs.
+    af_local_step: float = Field(0.25, gt=0.02, le=1.0)
+    af_local_min_ratio: float = Field(0.7, gt=0.0, le=1.0)
     # Wait for the lens to reach the commanded position (frame metadata) instead of a fixed
     # af_refine_settle_sec; af_refine_settle_sec stays the upper bound, af_refine_min_settle_sec
     # the lower one. Frames are always taken after the settle time.
@@ -124,6 +128,9 @@ class DetectionConfig(BaseModel):
     motion_threshold: float = Field(8.0, gt=0)
     edge_density_threshold: float = Field(0.02, gt=0, le=1.0)
     stable_frames_required: int = Field(8, ge=2, le=60)
+    # 1.0 = the original motion tolerance; 0.6 = 40 % less sensitive to movement of the page
+    # (the motion thresholds of the stability wait and of the pre-capture check are divided by it).
+    stability_sensitivity: float = Field(0.6, gt=0.1, le=1.0)
     removal_frames_required: int = Field(10, ge=2, le=120)
     detect_frames_required: int = Field(3, ge=1, le=30)
     lose_frames_required: int = Field(5, ge=1, le=60)

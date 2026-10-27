@@ -354,3 +354,57 @@ class TestConfigAndLogging:
             await _run(camera)
         assert "event=focus_sample" in caplog.text and "exposure_us=20000" in caplog.text
         assert "event=focus_timing path=hardware" in caplog.text and "refine_ms=" in caplog.text
+
+
+class TestLastSuccessfulFocusAsStartingPoint:
+    @pytest.mark.asyncio
+    async def test_next_document_needs_only_a_few_samples_and_no_hardware_cycle(self):
+        camera = LensCamera(peak=8.4, start=6.0, hw_af_lens=8.0)
+        ctl = AutofocusController(_cfg())
+        ctl.probe_capabilities(camera)
+        ctl.remember_lens(8.4)
+
+        result = await ctl.run_autofocus(camera, sharpness_threshold=1.0)
+
+        assert result.method == "memory+refine"
+        assert camera.cycle_calls == 0
+        assert len(camera.lens_calls) <= 5  # centre, two neighbours, one settled confirmation
+        assert abs(result.lens_after - 8.4) <= 0.15
+
+    @pytest.mark.asyncio
+    async def test_small_local_step_corrects_a_slightly_stale_position(self):
+        camera = LensCamera(peak=8.4, start=6.0, hw_af_lens=8.0)
+        ctl = AutofocusController(_cfg())
+        ctl.probe_capabilities(camera)
+        ctl.remember_lens(8.2)  # 0.2 dioptre off: e.g. the page sits a little higher now
+
+        result = await ctl.run_autofocus(camera, sharpness_threshold=1.0)
+
+        assert result.method == "memory+refine"
+        assert camera.cycle_calls == 0
+        assert abs(result.lens_after - 8.4) <= 0.15
+
+    @pytest.mark.asyncio
+    async def test_local_peak_that_is_worse_than_the_live_preview_falls_back_to_the_full_search(self):
+        class TwoHeights(LensCamera):
+            """A sharp peak at 9.4 and a much blurrier bump at 8.0 (where the last page was)."""
+
+            def _frame(self) -> np.ndarray:
+                sigma = min(7.0, 0.3 + 4.0 * abs(self.phys_lens - 9.4), 2.2 + 4.0 * abs(self.phys_lens - 8.0))
+                return cv2.GaussianBlur(_page(), (0, 0), sigma)
+
+        camera = TwoHeights(peak=9.4, start=9.4, hw_af_lens=9.2)  # the live preview is in focus at 9.4
+        ctl = AutofocusController(_cfg())
+        ctl.probe_capabilities(camera)
+        ctl.remember_lens(8.0)
+
+        result = await ctl.run_autofocus(camera, sharpness_threshold=1.0)
+
+        assert "memory" not in result.method
+        assert camera.cycle_calls >= 1
+        assert abs(result.lens_after - 9.4) <= 0.3
+        assert ctl.remembered_lens is None
+
+    def test_memory_lasts_hours_by_default(self):
+        assert CameraConfig().af_memory_max_age_sec >= 6 * 3600
+        assert CameraConfig().af_local_step == 0.25

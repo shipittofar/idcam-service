@@ -372,7 +372,7 @@ class ApplicationOrchestrator:
         if await self._abort_if_document_gone(frame):
             return False
         motion = self.detector.structural_motion_in_lock(frame)
-        threshold = self.config.detection.motion_threshold * 2.5
+        threshold = self.stability.effective_motion_threshold * 2.5
         self._publish_debug(frame)
         if motion > threshold:
             logger.warning(
@@ -677,6 +677,9 @@ class ApplicationOrchestrator:
             )
             self._transaction.mark_focus_completed(result.sharpness, result.min_required_sharpness)
             self._last_focus_lens = result.lens_after
+            # The last successful focus is the starting point for the next document; it is dropped
+            # again if the image taken with it is rejected, or if a later focus fails.
+            self.autofocus.remember_lens(result.lens_after)
             self.sm.touch_progress()
             logger.info(
                 "event=pipeline_stage stage=focus_verified method=%s sharpness=%.1f ratio=%.2f",

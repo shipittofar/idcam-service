@@ -48,7 +48,9 @@ camera:
   # Focus speed (docs/PERFORMANCE.md). Defaults shown; false/0 values restore the exhaustive procedure.
   af_adaptive: true              # skip the finest probe / confirmation when the peak is clean
   af_lens_memory: true           # start from the lens of the last validated capture
-  af_memory_max_age_sec: 1800
+  af_memory_max_age_sec: 21600   # 6 h
+  af_local_step: 0.25            # search step around the remembered lens (dioptres)
+  af_local_min_ratio: 0.7        # local result must reach 70% of the live preview sharpness
   af_settle_by_metadata: true    # wait for LensPosition metadata (bounded by af_refine_settle_sec)
   af_refine_settle_sec: 0.3      # upper bound (and the fixed wait when metadata is off)
   af_refine_min_settle_sec: 0.12
@@ -63,6 +65,7 @@ detection:
   motion_threshold: 8.0
   edge_density_threshold: 0.02
   stable_frames_required: 8
+  stability_sensitivity: 0.6     # 1.0 = original motion tolerance; 0.6 = 40% less sensitive
   removal_frames_required: 10
   removal_motion_factor: 0.5
   removal_edge_factor: 0.5

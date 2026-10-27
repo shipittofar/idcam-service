@@ -385,7 +385,7 @@ class AutofocusController:
         cfg = self.config
         range_fn = getattr(camera, "lens_position_range", None)
         lo, hi = range_fn() if callable(range_fn) else (0.0, 32.0)
-        step = float(cfg.af_refine_step)
+        step = float(cfg.af_local_step if local_only else cfg.af_refine_step)
         settle = float(cfg.af_refine_settle_sec)
         min_settle = min(float(cfg.af_refine_min_settle_sec), settle)
         tolerance = float(cfg.af_settle_tolerance)
@@ -484,7 +484,7 @@ class AutofocusController:
                 )
             return sharp
 
-        async def climb(origin: float) -> None:
+        async def climb(origin: float, *, fine_probes: bool = True) -> None:
             """Coarse hill-climb from ``origin`` in `step` increments, then fine probes."""
             moved_in_first_fine = False
             origin = clamp(origin)
@@ -506,8 +506,11 @@ class AutofocusController:
                 if improved:
                     break
             # The peak at close range is narrower than the coarse step (0.12 dioptre changed the
-            # metric 2.4x in logs), so probe both sides at smaller steps.
+            # metric 2.4x in logs), so probe both sides at smaller steps. (Not from the remembered
+            # lens: its step is already fine, and that position was itself a fine-tuned best.)
             best = max(pts, key=lambda p: pts[p])
+            if not fine_probes:
+                return
             for level, fine in enumerate((step * 0.4, step * 0.16)):
                 if level == 1 and adaptive and not moved_in_first_fine and self._bracketed(pts, best, 0.04):
                     break  # the peak is already bracketed by the first fine probes: stop here
@@ -528,13 +531,21 @@ class AutofocusController:
             return len(values) < 3 or values[-1] >= 1.3 * values[0]
 
         try:
-            await climb(start)
+            await climb(start, fine_probes=not local_only)
             if local_only:
                 best_local = max(pts, key=lambda p: pts[p])
-                if not (prominent() and self._bracketed(pts, best_local, 0.03)):
+                if not self._bracketed(pts, best_local, 0.03):
                     raise AutofocusError(
                         f"No bracketed focus peak around the remembered lens {start:.2f} "
                         f"(best {best_local:.2f}, {len(pts)} samples)"
+                    )
+                floor = float(cfg.af_local_min_ratio) * float(start_sharpness)
+                if pts[best_local] < floor:
+                    # The live (continuous-AF) preview was sharper than anything near the
+                    # remembered lens: the document is at another height now.
+                    raise AutofocusError(
+                        f"Remembered lens {best_local:.2f} reads {pts[best_local]:.0f}, below "
+                        f"{cfg.af_local_min_ratio:.0%} of the live preview ({start_sharpness:.0f})"
                     )
             elif cfg.af_wide_sweep and not prominent():
                 wide = float(cfg.af_wide_step)
