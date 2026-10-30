@@ -245,9 +245,10 @@ LEDs, and `led.colors` overrides the colour of any status as `[R, G, B]`
 `scripts/setup_local.sh` installs the LED libraries, adds your user to the `gpio` group and turns
 the strip on in `config.yaml`; pass `--no-led` to skip it.
 
-The strip is dark for everything up to the capture, so it never changes the light on the
-document the camera focuses and exposes; it only lights up afterwards (blue while uploading,
-green when done).
+The strip is steady white while no document is detected and goes dark as soon as one is
+detected, so it never changes the light on the document the camera focuses and exposes; it
+only lights up again afterwards (blue while uploading, green when done). Override any colour
+with `led.colors`, e.g. `ready: [0, 0, 0]` to keep the idle strip dark.
 
 ## User Status
 

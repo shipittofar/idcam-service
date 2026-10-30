@@ -117,8 +117,9 @@ debug:
 
 # WS2812B status LED strip (Raspberry Pi 5) — off by default.
 # Needs the LED libraries: run the installer with --with-led.
-# What the colours tell the user (the strip is OFF while starting, while waiting for a
-# document and while a document is detected, focused and captured):
+# What the colours tell the user (white while no document is detected; OFF while starting and
+# while a document is detected, focused and captured):
+#   white         no document - ready
 #   blue blinking captured - checking and uploading, wait
 #   green         uploaded (for a moment)
 #   green blink   done - remove the document

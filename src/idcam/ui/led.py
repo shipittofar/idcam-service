@@ -56,12 +56,13 @@ class LedPattern:
         return self.color
 
 
-# The strip is dark while starting, while waiting for a document and while a document is being
-# detected, stabilised, focused and captured: it only speaks once there is something for the
-# user to do or to wait for (processing, done, remove, failure, recovering, error). A status can
-# still be switched on with led.colors, e.g. {"ready": [255, 255, 255]}.
+# Steady white while no document is detected (IDLE); it goes dark as soon as one is detected and
+# stays dark while it is stabilised, focused and captured (and while starting). From then on it
+# only speaks once there is something for the user to do or to wait for (processing, done,
+# remove, failure, recovering, error). led.colors overrides any status, e.g. {"ready": [0, 0, 255]}.
 STARTING = DARK = LedPattern(OFF)
-READY = DOCUMENT = DARK
+READY = LedPattern(WHITE)
+DOCUMENT = DARK
 PROCESSING = LedPattern(BLUE, "blink", 0.6)
 DONE = LedPattern(GREEN)
 # Uploaded and waiting for the document to be taken away: green blinking.
