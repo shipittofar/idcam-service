@@ -29,6 +29,10 @@ _GATE_PIXEL_DIFF = 10  # a thumbnail pixel that changed by more than this ...
 _GATE_MAX_CHANGED = 2  # ... may occur at most this often
 _GATE_MAX_REUSE = 8  # consecutive reuses before the frame is analysed again anyway
 _BG_THUMB = (160, 90)  # colour thumbnail used to learn / compare the empty background
+_SIG_SIZE = (64, 48)  # grey patch of a captured document, to recognise a different one in its place
+_REPLACE_CALM_FRAMES = 5  # the picture must have been still this long before "replaced" is believed
+_REPLACE_MIN_IOU = 0.5  # a new outline overlapping the old one less than this is another document
+_REPLACE_MIN_NCC = 0.8  # correlation of the old document's area with itself now; lower = different content
 
 
 class DocumentPresence(str, Enum):
@@ -37,6 +41,14 @@ class DocumentPresence(str, Enum):
     DOCUMENT_MOVING = "document_moving"
     DOCUMENT_STABLE = "document_stable"
     DOCUMENT_READY = "document_ready"
+
+
+@dataclass(frozen=True)
+class DocumentSignature:
+    """What a captured document looked like: its box and a small grey patch of that area."""
+
+    bbox: tuple[int, int, int, int]
+    patch: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -303,6 +315,66 @@ class DocumentDetector:
         self._present_frames = self.config.detect_frames_required
         self._absent_frames = 0
         return True
+
+    # -- recognising a different document in the same place ------------------------------------------
+
+    @staticmethod
+    def _signature_patch(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray | None:
+        h, w = frame.shape[:2]
+        x, y, bw, bh = (int(v) for v in bbox)
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(w, x + bw), min(h, y + bh)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        gray = to_gray(frame[y0:y1, x0:x1])
+        return cv2.resize(gray, _SIG_SIZE, interpolation=cv2.INTER_AREA).astype(np.float32)
+
+    def document_signature(self, frame: np.ndarray) -> DocumentSignature | None:
+        """Remember the document that is in view now (box of its outline + a small patch)."""
+        geom = self._find_geometry(frame)
+        bbox = tuple(geom.bbox) if geom is not None else (self.lock.roi if self.lock.is_locked else None)
+        if not bbox or bbox[2] <= 0 or bbox[3] <= 0:
+            return None
+        patch = self._signature_patch(frame, bbox)  # type: ignore[arg-type]
+        return None if patch is None else DocumentSignature(tuple(int(v) for v in bbox), patch)  # type: ignore[arg-type]
+
+    def document_replaced(self, frame: np.ndarray, signature: DocumentSignature | None) -> bool:
+        """True when the document in view is a different one than ``signature`` (swapped by the next person).
+
+        Only believed when the picture has been still for a few frames (a hand passing is not a swap) and
+        a document-like outline is present. Either its outline barely overlaps the old one, or the old
+        area no longer correlates with what it showed.
+        """
+        if signature is None:
+            return False
+        geom = self._find_geometry(frame)  # also advances the calm counter for this frame
+        if self._calm_streak < _REPLACE_CALM_FRAMES:
+            return False
+        if geom is None or geom.confidence < self.config.min_geometry_confidence * 0.9:
+            return False  # nothing there: the ordinary removal path handles it
+        if _bbox_iou(signature.bbox, tuple(geom.bbox)) < _REPLACE_MIN_IOU:
+            return True
+        now = self._signature_patch(frame, signature.bbox)
+        if now is None:
+            return False
+        a = signature.patch - float(signature.patch.mean())
+        b = now - float(now.mean())
+        denom = float(np.sqrt((a * a).sum() * (b * b).sum()))
+        if denom < 1e-6:
+            return False  # a flat area carries no content to compare
+        return float((a * b).sum()) / denom < _REPLACE_MIN_NCC
+
+    def refresh_lock(self, frame: np.ndarray) -> bool:
+        """Re-lock when the outline in view no longer matches the lock (the page was swapped or moved)."""
+        if not self.lock.is_locked:
+            return False
+        geom = self._find_geometry(frame)
+        if geom is None or geom.confidence < self.config.min_geometry_confidence * 0.9:
+            return False
+        if _bbox_iou(self.lock.roi, tuple(geom.bbox)) >= 0.7:
+            return False
+        self.lock.release()
+        return self.lock_document(frame, allow_fallback=False)
 
     def release_lock(self) -> None:
         self._gate_small = None

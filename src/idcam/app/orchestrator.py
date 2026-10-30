@@ -145,6 +145,9 @@ class ApplicationOrchestrator:
         self._upload_crop_roi: tuple[int, int, int, int] | None = None
         # Cropped/resized upload copy, built while the full image is being validated.
         self._upload_copy_task: asyncio.Future | None = None
+        # What the document of the current/last capture looked like, to notice that the next person
+        # put a different one in its place without the scene ever being empty.
+        self._doc_signature = None
         self._background: set[asyncio.Task] = set()
         self._last_scene_empty = False
         self._last_transition_reason = ""
@@ -442,6 +445,12 @@ class ApplicationOrchestrator:
                 self.led.set_remove_hint(False)
                 logger.info("event=auto_capture_armed reason=scene_cleared_after_failure")
             return
+        if self._awaiting_clear_scene and detected and self.detector.document_replaced(frame, self._doc_signature):
+            logger.info("event=document_replaced state=IDLE failures=%d", self._consecutive_failures)
+            self._awaiting_clear_scene = False
+            self._clear_scene_count = 0
+            self._consecutive_failures = 0
+            self.led.set_remove_hint(False)
         if self._awaiting_clear_scene and detected:
             if self._consecutive_failures >= self.MAX_AUTO_RETRIES_WITH_DOCUMENT:
                 # Retrying on the same paper looped forever without ever asking the user to
@@ -742,6 +751,7 @@ class ApplicationOrchestrator:
                 self._transition(AppState.IDLE, reason="document_not_confirmed")
                 return
             self.stability.set_roi(self.detector.lock.roi)
+            self._doc_signature = self.detector.document_signature(frame)
             self._publish_debug(frame)
             logger.info("event=pipeline_stage stage=document_locked roi=%s", self.detector.lock.roi)
         if manual:
@@ -788,6 +798,11 @@ class ApplicationOrchestrator:
             )
             assert self._transaction is not None
             self._transaction.phase = TransactionPhase.STABILIZING
+            if await asyncio.to_thread(self.detector.refresh_lock, frame):
+                # the page was swapped (or moved a lot) while waiting: lock the one that is there now
+                logger.info("event=lock_refreshed roi=%s", self.detector.lock.roi)
+                self.stability.set_roi(self.detector.lock.roi)
+            self._doc_signature = await asyncio.to_thread(self.detector.document_signature, frame)
             if self._manual_focus:
                 await self._capture_with_manual_focus("document_stable")
                 return
@@ -1145,7 +1160,7 @@ class ApplicationOrchestrator:
     async def _success_tick(self) -> None:
         if not self._claim_state_action():
             return
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(0.8)  # long enough to see the green; the next person must not wait
         self._consecutive_failures = 0
         self._removal_count = 0
         self._removal_ticks = 0
@@ -1167,6 +1182,21 @@ class ApplicationOrchestrator:
             return
         empty = self.detector.is_scene_empty(frame)
         self._last_scene_empty = empty
+        if not empty and self.detector.document_replaced(frame, self._doc_signature):
+            logger.info(
+                "event=document_replaced state=WAITING_FOR_REMOVAL waited_ms=%d count=%d",
+                int(self.sm.elapsed() * 1000),
+                self._removal_count,
+            )
+            self._clear_transaction()
+            self._awaiting_clear_scene = False
+            self._consecutive_failures = 0
+            self.led.set_remove_hint(False)
+            self.stability.reset()
+            self._begin_transaction(trigger="auto")
+            self._publish_debug(frame)
+            self._transition(AppState.DOCUMENT_DETECTED, reason="document_replaced")
+            return
         if empty:
             self._removal_count += 1
         else:

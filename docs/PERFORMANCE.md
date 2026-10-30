@@ -62,6 +62,21 @@ brightness (0.2), detection defaults. See "Experimental profile".
 * Remaining big blocks: the still capture (~2-3 s at 64 MP) and the per-frame detection cost
   (~0.1 s on a PC, several times that on the Pi). Judge with `scripts/timing_report.py`.
 
+### Back-to-back documents
+
+* The next person may put a document down before the scene was ever empty (during the green pause, the
+  removal wait, or after repeated failures). The wait used to need N *empty* frames, so it hung: the
+  removal state has no timeout. Now each capture remembers its document (outline + a 64x48 grey patch).
+  When the picture has been still for 5 frames and a document-like outline is present that overlaps the old
+  one by less than 50 % or whose old area correlates < 0.8 with the remembered patch, it is a different
+  document: `event=document_replaced`, a new transaction starts at once (no wait for 3 detect frames).
+  The same page left in place never triggers it; a hand passing (picture not still) does not either.
+* If the page is swapped while waiting for stability, the lock follows it (`event=lock_refreshed`) instead
+  of focusing/cropping on the old outline.
+* The green pause after an accepted upload is 0.8 s instead of 2 s.
+* Not done (design change, would need background uploads): detecting the next document while the previous
+  upload is still running. The capture-to-response time (typically a few seconds) still blocks the next one.
+
 ## Autofocus decision logic
 
 1. Prepare: fresh frame, set the AF window on the document (≈ 0.3 s).
