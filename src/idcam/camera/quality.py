@@ -70,6 +70,7 @@ class ImageValidator:
         document_roi: tuple[int, int, int, int] | None = None,
         preview_size: tuple[int, int] | None = None,
         scaler_crop: tuple[int, int, int, int] | None = None,
+        image_crop: tuple[int, int, int, int] | None = None,
         reference_sharpness: float | None = None,
     ) -> ValidationResult:
         if not path.exists():
@@ -137,6 +138,7 @@ class ImageValidator:
                 preview_size,
                 (width, height),
                 scaler_crop=scaler_crop,
+                image_crop=image_crop,
             )
             roi_for_frame = still_doc_roi
             if reduce > 1:

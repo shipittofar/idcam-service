@@ -161,6 +161,8 @@ class CameraManager:
         )
         # LensPosition reported in the metadata of the last frame from capture_fresh_preview_array.
         self.last_fresh_lens: float | None = None
+        # Sensor region the last still covered (its own ScalerCrop), for mapping preview ROIs onto it.
+        self.last_still_scaler_crop: tuple[int, int, int, int] | None = None
         # Exposure details of that frame (None entries = the metadata field was not reported).
         self.last_fresh_meta: dict[str, Any] = {}
 
@@ -389,6 +391,7 @@ class CameraManager:
                     meta = request.get_metadata()
                     stamp = meta.get("SensorTimestamp")
                     if stamp is None or stamp >= ready_ns + settle_ns or time.monotonic() >= deadline:
+                        self.last_still_scaler_crop = parse_xywh(meta.get("ScalerCrop"))
                         t_save = time.monotonic()
                         request.save("main", str(path), format="jpeg")
                         if timings is not None:

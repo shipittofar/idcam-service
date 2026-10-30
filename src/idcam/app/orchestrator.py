@@ -933,13 +933,15 @@ class ApplicationOrchestrator:
             doc_roi = self.detector.document_preview_roi()
             preview_size = self._last_preview_size
             scaler_crop = self.camera.current_scaler_crop()
-            self._start_upload_copy(self._capture_path, doc_roi, preview_size, scaler_crop)
+            image_crop = getattr(self.camera, "last_still_scaler_crop", None)
+            self._start_upload_copy(self._capture_path, doc_roi, preview_size, scaler_crop, image_crop)
             result = await asyncio.to_thread(
                 self.validator.validate,
                 self._capture_path,
                 document_roi=focus_roi,
                 preview_size=preview_size,
                 scaler_crop=scaler_crop,
+                image_crop=image_crop,
                 reference_sharpness=self._transaction.sharpness_score or None,
             )
             self._transaction.mark_validated(
@@ -988,7 +990,7 @@ class ApplicationOrchestrator:
         except OSError:
             logger.warning("event=rejected_image_keep_failed", exc_info=True)
 
-    def _start_upload_copy(self, path: Path, doc_roi, preview_size, scaler_crop) -> None:
+    def _start_upload_copy(self, path: Path, doc_roi, preview_size, scaler_crop, image_crop=None) -> None:
         """Start building the upload copy in a worker thread while the image is validated.
 
         The crop box only needs the image size, which the JPEG header gives at once, so the two
@@ -1000,7 +1002,9 @@ class ApplicationOrchestrator:
         try:
             with Image.open(path) as img:
                 size = img.size
-            self._upload_crop_roi = scale_preview_roi_to_image(doc_roi, preview_size, size, scaler_crop=scaler_crop)
+            self._upload_crop_roi = scale_preview_roi_to_image(
+                doc_roi, preview_size, size, scaler_crop=scaler_crop, image_crop=image_crop
+            )
         except Exception:
             logger.warning("event=upload_crop_roi_failed", exc_info=True)
         if not cfg.crop_to_document and not cfg.max_dimension:

@@ -140,16 +140,38 @@ def scale_preview_roi_to_image(
     preview_size: tuple[int, int],
     image_size: tuple[int, int],
     scaler_crop: tuple[int, int, int, int] | None = None,
+    image_crop: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
-    """Map preview ROI to full-resolution still coordinates via ScalerCrop."""
+    """Map a preview ROI to still-image pixels via the sensor.
+
+    ``scaler_crop`` is the sensor region the preview shows, ``image_crop`` the sensor region the
+    still covers (its own ScalerCrop). Without ``image_crop`` it is inferred: a still with the
+    aspect ratio of the preview crop shows the same region (the usual case for a 16:9 still after
+    a 16:9 preview); otherwise the still is taken to be full-sensor, one image pixel per sensor
+    pixel (the 64 MP still). Assuming the latter for a small still pushed every ROI into the
+    bottom-right corner (``roi=(1279, 719, 1, 1)``) and made the sharpness check read 0.
+    """
     from idcam.camera.manager import map_preview_roi_to_sensor
 
     pw, ph = int(preview_size[0]), int(preview_size[1])
     iw, ih = int(image_size[0]), int(image_size[1])
     if scaler_crop is not None:
-        sx, sy, sw, sh = (int(v) for v in scaler_crop)
         mapped = map_preview_roi_to_sensor(roi, (pw, ph), scaler_crop)
-        return clip_roi(mapped, (ih, iw))
+        if image_crop is None:
+            sw, sh = int(scaler_crop[2]), int(scaler_crop[3])
+            same_view = sw > 0 and sh > 0 and abs((iw / max(ih, 1)) - (sw / sh)) <= 0.02 * (sw / sh)
+            image_crop = tuple(int(v) for v in scaler_crop) if same_view else (0, 0, iw, ih)
+        cx, cy, cw, ch = (int(v) for v in image_crop)
+        if cw <= 0 or ch <= 0:
+            cx, cy, cw, ch = 0, 0, iw, ih
+        mx, my, mw, mh = mapped
+        scaled = (
+            int(round((mx - cx) * iw / cw)),
+            int(round((my - cy) * ih / ch)),
+            max(1, int(round(mw * iw / cw))),
+            max(1, int(round(mh * ih / ch))),
+        )
+        return clip_roi(scaled, (ih, iw))
     sx = int(round(roi[0] * iw / max(pw, 1)))
     sy = int(round(roi[1] * ih / max(ph, 1)))
     sw = max(1, int(round(roi[2] * iw / max(pw, 1))))

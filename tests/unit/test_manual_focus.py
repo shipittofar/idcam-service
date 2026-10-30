@@ -661,3 +661,39 @@ class TestPanelEndpoints:
         assert orch._debug_viewer is not None
         assert orch._debug_viewer.focus_set_handler == orch.set_manual_focus
         assert orch._debug_viewer.focus_payload()["mode"] == "manual"
+
+
+class TestPreviewRoiOnASmallStill:
+    """The document ROI of a 1280x720 still used to collapse to (1279, 719, 1, 1)."""
+
+    def test_same_aspect_still_maps_proportionally(self):
+        from idcam.vision.sharpness import scale_preview_roi_to_image
+
+        crop = (0, 880, 9152, 5148)  # the 16:9 sensor region both streams show
+        roi = scale_preview_roi_to_image((320, 180, 640, 360), (1280, 720), (1280, 720), scaler_crop=crop)
+        assert roi == (320, 180, 640, 360)
+        half = scale_preview_roi_to_image((320, 180, 640, 360), (1280, 720), (640, 360), scaler_crop=crop)
+        assert half == (160, 90, 320, 180)
+
+    def test_full_resolution_still_keeps_the_sensor_coordinate_mapping(self):
+        from idcam.vision.sharpness import scale_preview_roi_to_image
+
+        crop = (0, 880, 9152, 5148)
+        roi = scale_preview_roi_to_image((320, 180, 640, 360), (1280, 720), (9152, 6944), scaler_crop=crop)
+        assert roi == (2288, 880 + 1287, 4576, 2574)  # one image pixel per sensor pixel, as before
+
+    def test_a_different_aspect_preview_uses_the_stills_own_crop(self):
+        from idcam.vision.sharpness import scale_preview_roi_to_image
+
+        preview_crop = (0, 502, 9152, 5491)  # 5:3 preview (2000x1200)
+        still_crop = (0, 898, 9152, 5148)  # 16:9 still (1280x720)
+        roi = scale_preview_roi_to_image(
+            (500, 300, 1000, 600), (2000, 1200), (1280, 720), scaler_crop=preview_crop, image_crop=still_crop
+        )
+        x, y, w, h = roi
+        assert 0 <= x < 1280 and 0 <= y < 720 and w > 100 and h > 100  # a real region, not a corner pixel
+        assert (w, h) != (1, 1)
+
+    def test_a_still_crop_recorded_from_metadata_is_used(self):
+        manager = CameraManager(CameraConfig(), use_mock=True)
+        assert manager.last_still_scaler_crop is None
