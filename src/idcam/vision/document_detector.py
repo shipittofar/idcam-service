@@ -20,6 +20,15 @@ from idcam.vision.sharpness import clip_roi, inner_roi, inscribed_focus_roi, roi
 
 logger = get_logger("vision.document_detector")
 
+# Static-scene gate: segmenting a frame costs ~0.1 s on a PC (several times that on the Pi) and the
+# idle loop, the stability wait and the pre-capture check all ask for the geometry of a scene that
+# has not changed. A frame that matches the last analysed one on a tiny thumbnail reuses its result.
+_GATE_SIZE = (96, 54)
+_GATE_MEAN_DIFF = 0.8  # grey levels, averaged over the thumbnail
+_GATE_PIXEL_DIFF = 10  # a thumbnail pixel that changed by more than this ...
+_GATE_MAX_CHANGED = 2  # ... may occur at most this often
+_GATE_MAX_REUSE = 8  # consecutive reuses before the frame is analysed again anyway
+
 
 class DocumentPresence(str, Enum):
     NO_DOCUMENT = "no_document"
@@ -104,6 +113,9 @@ class DocumentDetector:
         self._first_seen_at: float | None = None
         # Frame the cached ``_last_geometry`` was computed on (identity check, see _geometry_for).
         self._geometry_frame: np.ndarray | None = None
+        self._gate_small: np.ndarray | None = None
+        self._gate_reuse = 0
+        self.gate_hits = 0  # frames answered from the previous analysis (diagnostics / tests)
 
     @property
     def detection_latency_ms(self) -> int:
@@ -131,9 +143,26 @@ class DocumentDetector:
             w, h = self._last_frame_size
         return roi_rect((h, w), self.config.roi_center_fraction)
 
+    def _scene_unchanged(self, frame: np.ndarray) -> bool:
+        """True (and the thumbnail kept) when ``frame`` matches the last analysed one."""
+        small = cv2.resize(to_gray(frame), _GATE_SIZE, interpolation=cv2.INTER_AREA)
+        previous = self._gate_small
+        if previous is not None and self._gate_reuse < _GATE_MAX_REUSE:
+            diff = cv2.absdiff(small, previous)
+            if float(diff.mean()) < _GATE_MEAN_DIFF and int(np.count_nonzero(diff > _GATE_PIXEL_DIFF)) <= _GATE_MAX_CHANGED:
+                return True
+        self._gate_small = small
+        self._gate_reuse = 0
+        return False
+
     def _find_geometry(self, frame: np.ndarray):
         h, w = frame.shape[:2]
         self._last_frame_size = (int(w), int(h))
+        if self._scene_unchanged(frame):
+            self._gate_reuse += 1
+            self.gate_hits += 1
+            self._geometry_frame = frame
+            return self._last_geometry
         geom = detect_document_geometry(
             frame,
             min_area_fraction=self.config.geometry_min_area_fraction,
@@ -221,6 +250,7 @@ class DocumentDetector:
         return True
 
     def release_lock(self) -> None:
+        self._gate_small = None
         self.lock.release()
         self._detected_latched = False
         self._present_frames = 0
@@ -352,6 +382,7 @@ class DocumentDetector:
         )
 
     def reset_baseline(self) -> None:
+        self._gate_small = None
         self._baseline_norm = None
         self._prev_norm = None
         self._present_frames = 0

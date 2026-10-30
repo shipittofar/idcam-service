@@ -377,6 +377,54 @@ class TestGeometryReuse:
         with patch.object(det_module, "detect_document_geometry", wraps=real) as spy:
             det.is_scene_empty(frame)  # what _abort_if_document_gone does
             det.structural_motion_in_lock(frame)  # what the motion check does next
-            assert spy.call_count == 1
+            # at most one segmentation (none when the static-scene gate already knows this scene)
+            assert spy.call_count <= 1
+            before = spy.call_count
             det.structural_motion_in_lock(_document_frame(margin_x=90, margin_y=70))  # a new frame is analysed
+            assert spy.call_count == before + 1
+
+
+class TestStaticSceneGate:
+    @staticmethod
+    def _counting(det_frames):
+        from unittest.mock import patch
+
+        real = det_module.detect_document_geometry
+        return patch.object(det_module, "detect_document_geometry", wraps=real)
+
+    def test_an_unchanged_scene_is_segmented_once_then_reused(self):
+        det = DocumentDetector(DetectionConfig())
+        frame = _desk_frame()
+        with self._counting(frame) as spy:
+            for _ in range(6):
+                det.detect(frame.copy())
+            assert spy.call_count == 1
+        assert det.gate_hits == 5
+
+    def test_sensor_noise_alone_does_not_force_a_new_analysis(self):
+        det = DocumentDetector(DetectionConfig())
+        base = _desk_frame().astype(np.int16)
+        rng = np.random.default_rng(3)
+        with self._counting(base) as spy:
+            for _ in range(5):
+                noisy = np.clip(base + rng.integers(-2, 3, base.shape), 0, 255).astype(np.uint8)
+                det.detect(noisy)
+            assert spy.call_count == 1
+
+    def test_a_document_entering_is_analysed_at_once(self):
+        det = DocumentDetector(DetectionConfig(min_geometry_confidence=0.25))
+        desk = _desk_frame()
+        page = _document_frame(margin_x=90, margin_y=70)
+        with self._counting(desk) as spy:
+            det.detect(desk)
+            det.detect(page)
             assert spy.call_count == 2
+        assert det._last_geometry is not None
+
+    def test_a_static_scene_is_still_re_analysed_now_and_then(self):
+        det = DocumentDetector(DetectionConfig())
+        frame = _desk_frame()
+        with self._counting(frame) as spy:
+            for _ in range(20):
+                det.detect(frame.copy())
+            assert 2 <= spy.call_count <= 3  # every 9th frame

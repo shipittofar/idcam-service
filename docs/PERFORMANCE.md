@@ -54,6 +54,11 @@ brightness (0.2), detection defaults. See "Experimental profile".
   validated; they only read the file, so the ~0.8 s copy and the ~0.5 s validation overlap.
   A rejected image discards the copy. JPEG `optimize` is off (one encode pass).
 * Manual focus mode skips the FOCUSING state entirely (no focus step at all).
+* Static-scene gate in the detector: a frame that matches the last analysed one on a 96x54
+  thumbnail (mean diff < 0.8, at most 2 pixels changed by > 10) reuses its geometry; at most 8 reuses
+  in a row. Idle, stability wait and pre-capture check no longer re-segment an unchanged scene
+  (synthetic PC benchmark: ~145 ms -> ~20 ms per frame on average; Pi numbers not measured). A document
+  entering or moving changes the thumbnail and is analysed at once.
 * Remaining big blocks: the still capture (~2-3 s at 64 MP) and the per-frame detection cost
   (~0.1 s on a PC, several times that on the Pi). Judge with `scripts/timing_report.py`.
 
