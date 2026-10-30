@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import statistics
 import time
+
+import numpy as np
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -19,6 +21,24 @@ from idcam.logging.setup import get_logger
 from idcam.vision.sharpness import preview_sharpness
 
 logger = get_logger("camera.lens_search")
+
+
+def exposure_normalised_sharpness(frame: Any, roi: tuple[int, int, int, int] | None = None) -> float:
+    """Gradient energy divided by the squared mean brightness of the same area.
+
+    Auto exposure keeps changing during a sweep (a blurred frame is metered differently: 60 ms
+    against 33 ms in the logs), and gradient energy grows with the square of the brightness, so the
+    raw number can rank a worse lens position higher. The ratio does not depend on it.
+    """
+    raw = float(preview_sharpness(frame, roi=roi))
+    arr = np.asarray(frame)
+    if roi is not None and arr.ndim >= 2:
+        x, y, w, h = (int(v) for v in roi)
+        area = arr[max(0, y) : max(0, y) + max(1, h), max(0, x) : max(0, x) + max(1, w)]
+        if area.size:
+            arr = area
+    mean = float(np.mean(arr))
+    return raw / (mean * mean + 1.0)
 
 
 @dataclass(frozen=True)
@@ -41,7 +61,7 @@ def find_sharpest_lens(
     fine_step: float = 0.1,
     min_peak_ratio: float = 1.3,
     start: float = 1.0,
-    sharpness_fn: Callable[..., float] = preview_sharpness,
+    sharpness_fn: Callable[..., float] = exposure_normalised_sharpness,
     max_seconds: float = 120.0,
 ) -> LensSearchResult:
     """Return the lens position with the sharpest ``roi``; raises AutofocusError without a clear peak.

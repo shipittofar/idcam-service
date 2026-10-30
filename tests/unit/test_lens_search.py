@@ -75,3 +75,30 @@ def test_gives_up_when_it_takes_too_long():
     cam = FakeLensCamera()
     with pytest.raises(AutofocusError, match="too long"):
         search(cam, max_seconds=-1.0)
+
+
+def test_sharpness_does_not_depend_on_the_auto_exposure_level():
+    import numpy as np
+
+    from idcam.camera.lens_search import exposure_normalised_sharpness
+
+    rng = np.random.default_rng(1)
+    pattern = (rng.random((120, 160, 3)) > 0.5).astype(np.float32)
+    dim = (pattern * 60 + 20).astype(np.uint8)
+    bright = (pattern * 120 + 40).astype(np.uint8)  # the same scene, twice the exposure
+    a = exposure_normalised_sharpness(dim, roi=(10, 10, 100, 80))
+    b = exposure_normalised_sharpness(bright, roi=(10, 10, 100, 80))
+    assert b == pytest.approx(a, rel=0.05)
+
+
+def test_a_blurred_frame_scores_lower_even_when_it_is_brighter():
+    import cv2
+    import numpy as np
+
+    from idcam.camera.lens_search import exposure_normalised_sharpness
+
+    rng = np.random.default_rng(2)
+    sharp = ((rng.random((120, 160, 3)) > 0.5) * 100 + 30).astype(np.uint8)
+    blurred = cv2.GaussianBlur(sharp, (9, 9), 0)
+    blurred = np.clip(blurred.astype(np.int16) + 60, 0, 255).astype(np.uint8)  # longer exposure
+    assert exposure_normalised_sharpness(sharp, roi=(10, 10, 100, 80)) > exposure_normalised_sharpness(blurred, roi=(10, 10, 100, 80))

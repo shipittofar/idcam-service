@@ -34,6 +34,11 @@ def tenengrad(gray: np.ndarray) -> float:
     return float(np.mean(gx * gx + gy * gy))
 
 
+def normalised(gray: np.ndarray) -> float:
+    """Tenengrad divided by the squared mean: independent of the auto-exposure level."""
+    return tenengrad(gray) / (float(np.mean(gray)) ** 2 + 1.0)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--min", type=float, default=1.5)
@@ -66,7 +71,7 @@ def main() -> int:
     rows = []
     grid: list[tuple[float, list[float]]] = []
     pos = args.min
-    print(f"{'lens':>6} {'lens_meta':>10} {'sharp_centre':>13} {'sharp_full':>11} {'exp_us':>8} {'gain':>5}")
+    print(f"{'lens':>6} {'lens_meta':>10} {'sharp_centre':>13} {'norm_centre':>12} {'exp_us':>8} {'gain':>5}")
     while pos <= args.max + 1e-9:
         cam.set_controls({"AfMode": 0, "LensPosition": float(pos)})
         time.sleep(args.settle)
@@ -83,23 +88,25 @@ def main() -> int:
         h, w = gray.shape
         centre = gray[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
         tiles = [
-            tenengrad(gray[r * h // 3 : (r + 1) * h // 3, c * w // 3 : (c + 1) * w // 3]) for r in range(3) for c in range(3)
+            normalised(gray[r * h // 3 : (r + 1) * h // 3, c * w // 3 : (c + 1) * w // 3]) for r in range(3) for c in range(3)
         ]
         grid.append((pos, tiles))
-        row = (pos, meta.get("LensPosition"), tenengrad(centre), tenengrad(gray), meta.get("ExposureTime"), meta.get("AnalogueGain"))
+        row = (pos, meta.get("LensPosition"), tenengrad(centre), normalised(centre), meta.get("ExposureTime"), meta.get("AnalogueGain"))
         rows.append(row)
         lm = f"{row[1]:.2f}" if isinstance(row[1], (int, float)) else "n/a"
         gain = f"{row[5]:.1f}" if isinstance(row[5], (int, float)) else "n/a"
-        print(f"{pos:6.2f} {lm:>10} {row[2]:13.1f} {row[3]:11.1f} {row[4] or 0:8d} {gain:>5}")
+        print(f"{pos:6.2f} {lm:>10} {row[2]:13.1f} {row[3] * 1e4:12.2f} {row[4] or 0:8d} {gain:>5}")
         pos += args.step
     cam.stop()
     cam.close()
 
-    best = max(rows, key=lambda r: r[2])
-    values = [r[2] for r in rows]
+    best = max(rows, key=lambda r: r[3])  # exposure-normalised, see the norm_centre column
+    values = [r[3] for r in rows]
     spread = (max(values) - min(values)) / max(float(np.mean(values)), 1e-6)
     print()
-    print(f"sharpest centre: lens {best[0]:.2f} ({best[2]:.1f})")
+    print(f"sharpest centre: lens {best[0]:.2f} (norm {best[3] * 1e4:.2f}, raw {best[2]:.1f})")
+    if best[0] >= rows[-1][0] - 1e-6 or best[0] <= rows[0][0] + 1e-6:
+        print("The best value is at the END of the swept range: the real peak may lie outside it. Widen --min/--max.")
     metas = {round(r[1], 2) for r in rows if isinstance(r[1], (int, float))}
     if len(metas) <= 1:
         print("lens_meta never changes: the driver may not report the lens position (that alone is not an error).")
