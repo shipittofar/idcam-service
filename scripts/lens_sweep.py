@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Does the lens really move? Sweep LensPosition and print the sharpness of the centre.
+"""Does the lens really move, and does ONE lens position fit the whole field of view?
+
+Sweeps LensPosition and measures the sharpness of a 3x3 grid of tiles at every position. The summary
+tells whether the best lens position is the same everywhere (one saved manual value is enough) or
+differs by place (tilted camera / curved field: use focus_mode auto, which focuses on each document).
 
 Stop the service first (it holds the camera):
 
@@ -7,7 +11,8 @@ Stop the service first (it holds the camera):
     .venv/bin/python scripts/lens_sweep.py            # default 1.5 .. 12
     .venv/bin/python scripts/lens_sweep.py --min 2 --max 8 --step 0.5 --save /tmp/sweep
 
-Put the document where it will be used. The sharpest row is the lens position to save in the panel.
+Cover the WHOLE view with something full of fine detail (a newspaper page or a printed text sheet laid flat
+on the table, edge to edge). The tiles are only comparable when each one sees texture.
 A column that never changes (sharpness flat, ``lens_meta`` constant) means the lens does not respond.
 Nothing is sent anywhere; ``--save DIR`` writes one JPEG per position for you to look at, then delete.
 """
@@ -59,6 +64,7 @@ def main() -> int:
         args.save.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    grid: list[tuple[float, list[float]]] = []
     pos = args.min
     print(f"{'lens':>6} {'lens_meta':>10} {'sharp_centre':>13} {'sharp_full':>11} {'exp_us':>8} {'gain':>5}")
     while pos <= args.max + 1e-9:
@@ -76,6 +82,10 @@ def main() -> int:
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         h, w = gray.shape
         centre = gray[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
+        tiles = [
+            tenengrad(gray[r * h // 3 : (r + 1) * h // 3, c * w // 3 : (c + 1) * w // 3]) for r in range(3) for c in range(3)
+        ]
+        grid.append((pos, tiles))
         row = (pos, meta.get("LensPosition"), tenengrad(centre), tenengrad(gray), meta.get("ExposureTime"), meta.get("AnalogueGain"))
         rows.append(row)
         lm = f"{row[1]:.2f}" if isinstance(row[1], (int, float)) else "n/a"
@@ -98,6 +108,27 @@ def main() -> int:
         print("detail at this distance. Check the cable/driver, the libcamera version and the distance to the document.")
     else:
         print(f"Sharpness varies by {spread * 100:.0f} % across the sweep: the lens responds. Save {best[0]:.2f} in the panel.")
+
+    names = ["top-left", "top", "top-right", "left", "centre", "right", "bottom-left", "bottom", "bottom-right"]
+    print()
+    print("best lens position per area of the view:")
+    best_per_tile = []
+    for i, name in enumerate(names):
+        series = [(p, t[i]) for p, t in grid]
+        top = max(series, key=lambda x: x[1])
+        floor = min(v for _, v in series)
+        best_per_tile.append((name, top[0], top[1] / max(floor, 1e-6)))
+        print(f"  {name:>13}: lens {top[0]:5.2f}   (peak is {top[1] / max(floor, 1e-6):4.1f}x its weakest position)")
+    lenses = [b[1] for b in best_per_tile if b[2] >= 1.3]  # tiles with a real peak only
+    if len(lenses) < 5:
+        print("Fewer than 5 areas show a real peak: the view has too little detail or the lens does not respond.")
+    else:
+        spread_lens = max(lenses) - min(lenses)
+        if spread_lens <= 1.0:
+            print(f"The best position is the same everywhere (spread {spread_lens:.2f} dioptres): one manual value fits the whole view.")
+        else:
+            print(f"The best position differs by {spread_lens:.2f} dioptres across the view: one fixed lens value cannot be sharp")
+            print("everywhere. Use focus_mode: auto (focus on each document) or make the camera look straight down at the table.")
     return 0
 
 
