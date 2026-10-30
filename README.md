@@ -164,6 +164,10 @@ See `config.example.yaml`. Key settings:
 
 Environment overrides: `IDCAM_CONFIG`, `IDCAM_AUTH_TOKEN`, `IDCAM_DEVICE_ID`, `IDCAM_SERVER_URL`, `IDCAM_ENV`, `IDCAM_MOCK_CAMERA`.
 
+## False detections (something always in view)
+
+`detection.background_check: true` makes the detector learn what the empty scene looks like (the first ~2 s after a start, once the picture is calm) and ignore a "document" whose area still looks like that background: furniture, a mat, cables, shadows that are always there. The idle log line shows `reason=static_background` for those. It keeps refreshing the background while nothing is detected (follows slow light changes). Limits: a document already lying there when the service starts counts as background until it is taken away and put back; a very large always-present object can hide a small document placed on it; if the picture never gets calm the check is skipped (`background_check_skipped`). Together with `detect_min_iou` (the same outline in consecutive frames) and `min_geometry_confidence`. Off by default.
+
 ## Exposure and white balance
 
 Everything is automatic by default. Under `camera:` you can set `exposure_value` (brightness compensation in stops), `ae_exposure_mode: short` (shorter exposures, less motion blur), `awb_mode`, or fix the exposure with `exposure_time_us` (+ `analogue_gain`), which switches auto exposure off for the preview and the still. A fixed exposure only makes sense under constant light: first read `exposure_us` / `gain` in the `focus_sample` and `still_capture_metadata` log lines. Controls the camera does not advertise are dropped with a warning (`image_controls_unsupported`).

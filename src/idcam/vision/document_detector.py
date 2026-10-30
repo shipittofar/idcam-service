@@ -28,6 +28,7 @@ _GATE_MEAN_DIFF = 0.8  # grey levels, averaged over the thumbnail
 _GATE_PIXEL_DIFF = 10  # a thumbnail pixel that changed by more than this ...
 _GATE_MAX_CHANGED = 2  # ... may occur at most this often
 _GATE_MAX_REUSE = 8  # consecutive reuses before the frame is analysed again anyway
+_BG_THUMB = (160, 90)  # colour thumbnail used to learn / compare the empty background
 
 
 class DocumentPresence(str, Enum):
@@ -116,6 +117,11 @@ class DocumentDetector:
         self._gate_small: np.ndarray | None = None
         self._gate_reuse = 0
         self._candidate_bbox: tuple[int, int, int, int] | None = None
+        # Empty-scene background (see DetectionConfig.background_check)
+        self._bg_thumb: np.ndarray | None = None
+        self._calm_streak = 0  # consecutive frames that look like the previous analysed one
+        self._bg_frames_seen = 0
+        self._bg_given_up = False
         self.gate_hits = 0  # frames answered from the previous analysis (diagnostics / tests)
 
     @property
@@ -148,13 +154,61 @@ class DocumentDetector:
         """True (and the thumbnail kept) when ``frame`` matches the last analysed one."""
         small = cv2.resize(to_gray(frame), _GATE_SIZE, interpolation=cv2.INTER_AREA)
         previous = self._gate_small
-        if previous is not None and self._gate_reuse < _GATE_MAX_REUSE:
+        similar = False
+        if previous is not None:
             diff = cv2.absdiff(small, previous)
-            if float(diff.mean()) < _GATE_MEAN_DIFF and int(np.count_nonzero(diff > _GATE_PIXEL_DIFF)) <= _GATE_MAX_CHANGED:
-                return True
+            similar = float(diff.mean()) < _GATE_MEAN_DIFF and int(np.count_nonzero(diff > _GATE_PIXEL_DIFF)) <= _GATE_MAX_CHANGED
+        self._calm_streak = self._calm_streak + 1 if similar else 0
+        if similar and self._gate_reuse < _GATE_MAX_REUSE:
+            return True
         self._gate_small = small
         self._gate_reuse = 0
         return False
+
+    # -- empty-scene background ---------------------------------------------------------------
+
+    @staticmethod
+    def _bg_thumbnail(frame: np.ndarray) -> np.ndarray:
+        return cv2.resize(frame, _BG_THUMB, interpolation=cv2.INTER_AREA).astype(np.float32)
+
+    def _update_background(self, thumb: np.ndarray) -> bool:
+        """Learn / refresh the empty background. False while it is still being learned at start."""
+        cfg = self.config
+        if self._bg_given_up:
+            return True
+        self._bg_frames_seen += 1
+        if self._bg_thumb is None:
+            if self._calm_streak >= cfg.background_warmup_frames:
+                self._bg_thumb = thumb
+                logger.info("event=background_learned frames_seen=%d", self._bg_frames_seen)
+                return True
+            if self._bg_frames_seen >= cfg.background_give_up_frames:
+                self._bg_given_up = True
+                logger.warning("event=background_check_skipped reason=scene_never_calm")
+                return True
+            return False
+        if not self.is_latched and self._calm_streak and self._calm_streak % cfg.background_refresh_frames == 0:
+            self._bg_thumb = thumb  # follow slow light changes while nothing is detected
+        return True
+
+    def _is_background(self, thumb: np.ndarray, bbox: tuple[int, int, int, int], frame_size: tuple[int, int]) -> bool:
+        """True when the candidate's area still looks like the learned empty background."""
+        base = self._bg_thumb
+        if base is None or base.shape != thumb.shape:
+            return False
+        fw, fh = frame_size
+        tw, th = _BG_THUMB
+        x, y, w, h = bbox
+        x0 = max(0, min(tw - 1, int(x * tw / fw)))
+        y0 = max(0, min(th - 1, int(y * th / fh)))
+        x1 = max(x0 + 1, min(tw, int(np.ceil((x + w) * tw / fw))))
+        y1 = max(y0 + 1, min(th, int(np.ceil((y + h) * th / fh))))
+        diff = thumb - base
+        outside = np.ones(diff.shape[:2], bool)
+        outside[y0:y1, x0:x1] = False
+        offset = diff[outside].mean(axis=0) if outside.sum() >= 0.1 * outside.size else 0.0  # global exposure shift
+        inner = float(np.abs(diff[y0:y1, x0:x1] - offset).mean())
+        return inner < self.config.background_min_diff
 
     def _find_geometry(self, frame: np.ndarray):
         h, w = frame.shape[:2]
@@ -445,6 +499,18 @@ class DocumentDetector:
                 self._prev_corners = self.lock.corners
             return True
 
+        background_reason = ""
+        if self.config.background_check:
+            thumb = self._bg_thumbnail(frame)
+            if not self._update_background(thumb):
+                background_reason = "learning_background"
+            elif geom and geom.confidence >= self.config.min_geometry_confidence:
+                h, w = frame.shape[:2]
+                if self._is_background(thumb, tuple(geom.bbox), (w, h)):
+                    background_reason = "static_background"
+        if background_reason:
+            geom = None  # nothing new in the picture: not a document (the cached outline stays for reuse)
+
         if geom and geom.confidence >= self.config.min_geometry_confidence:
             same_object = (
                 self._candidate_bbox is None
@@ -472,7 +538,9 @@ class DocumentDetector:
                     self._detected_latched = False
             else:
                 self._absent_frames += 1
-            if geom is None:
+            if background_reason:
+                self._last_reject_reason = background_reason
+            elif geom is None:
                 self._last_reject_reason = "no_document_geometry"
             else:
                 self._last_reject_reason = f"low_geometry_confidence_{geom.confidence:.2f}"

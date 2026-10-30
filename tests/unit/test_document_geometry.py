@@ -480,3 +480,62 @@ class TestSameObjectDetection:
         feed((100, 100, 400, 300))
         feed((100, 100, 400, 300), conf=0.3)
         assert feed((100, 100, 400, 300)) is False
+
+
+class TestEmptySceneBackground:
+    """With background_check a candidate must differ from the learned empty scene."""
+
+    @staticmethod
+    def _furniture():
+        return _document_frame(desk=210, paper=60, margin_x=90, margin_y=70)  # looks like a document, always there
+
+    @staticmethod
+    def _cfg(**kwargs):
+        return DetectionConfig(min_geometry_confidence=0.25, background_check=True, background_warmup_frames=4, **kwargs)
+
+    def test_the_furniture_scene_is_detected_without_the_check(self):
+        det = DocumentDetector(DetectionConfig(min_geometry_confidence=0.25, background_check=False))
+        assert any(det.detect(self._furniture().copy()) for _ in range(10))
+
+    def test_furniture_that_was_there_from_the_start_is_never_a_document(self):
+        det = DocumentDetector(self._cfg())
+        results = [det.detect(self._furniture().copy()) for _ in range(40)]
+        assert not any(results)
+        assert det._last_reject_reason == "static_background"
+
+    def test_a_document_placed_on_the_learned_desk_is_detected(self):
+        det = DocumentDetector(self._cfg())
+        desk = _desk_frame(desk=210)
+        for _ in range(12):
+            det.detect(desk.copy())  # learn the empty desk
+        results = [det.detect(self._furniture().copy()) for _ in range(8)]
+        assert results[-1] is True
+
+    def test_a_larger_document_placed_over_the_furniture_is_detected(self):
+        det = DocumentDetector(self._cfg())
+        for _ in range(12):
+            det.detect(self._furniture().copy())
+        bigger = _document_frame(desk=210, paper=120, margin_x=50, margin_y=40)
+        results = [det.detect(bigger.copy()) for _ in range(8)]
+        assert results[-1] is True
+
+    def test_nothing_is_reported_while_the_background_is_still_being_learned(self):
+        det = DocumentDetector(self._cfg())
+        assert det.detect(self._furniture().copy()) is False
+        assert det._last_reject_reason == "learning_background"
+
+    def test_a_scene_that_never_calms_down_does_not_block_detection_forever(self):
+        det = DocumentDetector(self._cfg(background_give_up_frames=20))
+        rng = np.random.default_rng(2)
+        page = self._furniture()
+        for _ in range(30):
+            noisy = np.clip(page.astype(np.int16) + rng.integers(-60, 61, page.shape), 0, 255).astype(np.uint8)
+            det.detect(noisy)
+        assert det._bg_given_up is True
+
+    def test_global_exposure_change_is_not_a_new_object(self):
+        det = DocumentDetector(self._cfg())
+        for _ in range(12):
+            det.detect(self._furniture().copy())
+        brighter = np.clip(self._furniture().astype(np.int16) + 18, 0, 255).astype(np.uint8)
+        assert not any(det.detect(brighter.copy()) for _ in range(10))

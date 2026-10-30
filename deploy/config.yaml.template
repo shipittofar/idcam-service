@@ -73,6 +73,10 @@ detection:
   motion_threshold: 8.0
   edge_density_threshold: 0.02
   stable_frames_required: 5
+  # Ignore "documents" that are really the always-there scene (furniture, a mat, cables, shadows):
+  # the empty desk is learned at start and a candidate must differ from it. Costs ~2 s after each start.
+  # background_check: true
+  # background_min_diff: 10.0
   stability_sensitivity: 0.4     # 1.0 = original tolerance; lower = less sensitive to page movement
   removal_frames_required: 10
   removal_motion_factor: 0.5

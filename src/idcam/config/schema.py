@@ -174,6 +174,20 @@ class DetectionConfig(BaseModel):
     # produces a different best candidate every frame (cables, edges, shadows); a document sits still.
     # 0 switches the check off.
     detect_min_iou: float = Field(0.5, ge=0.0, le=1.0)
+    # A document must CHANGE the picture. The detector learns what the empty scene looks like (at start,
+    # once the picture has been calm for background_warmup_frames) and ignores a candidate whose area
+    # still looks like that background (furniture, a mat, cables, shadows that are always there). It
+    # keeps learning while nothing is detected (every background_refresh_frames calm frames) so slow
+    # light changes are followed. A mean colour difference above background_min_diff (0..255) inside the
+    # candidate's box counts as "something new". If the picture never gets calm for
+    # background_give_up_frames the check is skipped. Off by default: the first ~2 s after a start are
+    # spent learning, and a document already lying there at start counts as background until it is
+    # taken away and put back.
+    background_check: bool = False
+    background_min_diff: float = Field(10.0, gt=0.0, le=255.0)
+    background_warmup_frames: int = Field(10, ge=2, le=200)
+    background_refresh_frames: int = Field(60, ge=10, le=2000)
+    background_give_up_frames: int = Field(200, ge=20, le=5000)
     geometry_min_area_fraction: float = Field(0.02, gt=0, le=1.0)  # passport-size page at 3% of the frame
     geometry_max_area_fraction: float = Field(0.85, gt=0, le=1.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)
