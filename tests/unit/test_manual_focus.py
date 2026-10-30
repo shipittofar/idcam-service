@@ -346,6 +346,42 @@ class TestOrchestratorManualFocus:
         orch.camera.trigger_autofocus.assert_not_called()
 
 
+class TestFocusingStateIsSkipped:
+    @pytest.mark.asyncio
+    async def test_stable_document_goes_straight_to_capturing(self, tmp_path):
+        orch = _orch(tmp_path, focus_mode="manual")
+        orch.camera.initialize()
+        orch.camera.set_manual_lens(8.8)
+        orch.sm.state = AppState.WAITING_FOR_STABILITY
+        orch._transaction = ActiveCaptureTransaction(capture_id="cap-skip")
+        frame = _document()
+        orch._safe_preview = AsyncMock(return_value=frame)
+        orch.detector.lock_document(frame, allow_fallback=True)
+        orch.detector.is_scene_empty = MagicMock(return_value=False)
+        orch.autofocus.run_autofocus = AsyncMock()
+        seen = []
+        for _ in range(20):
+            await orch._stability_tick()
+            seen.append(orch.sm.state)
+            if orch.sm.state == AppState.CAPTURING:
+                break
+        assert orch.sm.state == AppState.CAPTURING
+        assert AppState.FOCUSING not in seen
+        assert orch._last_focus_lens == 8.8
+        orch.autofocus.run_autofocus.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_manual_capture_request_also_skips_focusing(self, tmp_path):
+        orch = _orch(tmp_path, focus_mode="manual")
+        orch.camera.initialize()
+        orch.camera.set_manual_lens(8.8)
+        orch.sm.state = AppState.DOCUMENT_DETECTED
+        orch._transaction = ActiveCaptureTransaction(capture_id="cap-man", trigger="manual")
+        orch._safe_preview = AsyncMock(return_value=_document())
+        await orch._document_detected_tick()
+        assert orch.sm.state == AppState.CAPTURING
+
+
 def _document() -> np.ndarray:
     frame = np.full((120, 160, 3), 200, dtype=np.uint8)
     frame[20:100, 20:140] = 40

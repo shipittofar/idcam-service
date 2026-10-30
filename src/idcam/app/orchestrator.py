@@ -677,6 +677,9 @@ class ApplicationOrchestrator:
             self._publish_debug(frame)
             logger.info("event=pipeline_stage stage=document_locked roi=%s", self.detector.lock.roi)
         if manual:
+            if self._manual_focus:
+                await self._capture_with_manual_focus("manual_capture_skip_stability")
+                return
             self._set_manual_phase("focusing", "Focusing...")
             self._transition(AppState.FOCUSING, reason="manual_capture_skip_stability")
             return
@@ -717,11 +720,28 @@ class ApplicationOrchestrator:
             )
             assert self._transaction is not None
             self._transaction.phase = TransactionPhase.STABILIZING
+            if self._manual_focus:
+                await self._capture_with_manual_focus("document_stable")
+                return
             self._set_manual_phase("focusing", "Focusing...")
             self._transition(AppState.FOCUSING, reason="document_stable")
         else:
             self._publish_debug(frame)
             self.sm.touch_progress()
+
+    async def _capture_with_manual_focus(self, reason: str) -> None:
+        """Manual focus mode: there is nothing to focus, so FOCUSING is never entered.
+
+        The lens already sits on the confirmed value (the preview keeps it there); go straight to
+        CAPTURING after re-measuring the locked outline on a settled frame.
+        """
+        assert self._transaction is not None
+        self._last_focus_lens = self.camera.get_manual_lens()
+        logger.info("event=pipeline_stage stage=focus_skipped mode=manual lens=%s", self._last_focus_lens)
+        settled = await self._safe_preview(fresh=True)
+        if settled is not None:
+            await asyncio.to_thread(self.detector.rebaseline_motion, settled)
+        self._transition(AppState.CAPTURING, reason=reason)
 
     async def _focusing_tick(self) -> None:
         if not self._claim_state_action():
