@@ -330,7 +330,12 @@ class TestSceneEmpty:
 
     def test_page_in_view_is_not_empty(self):
         assert not self._detector_with(0.60).is_scene_empty(_desk_frame())
-        assert not self._detector_with(0.40).is_scene_empty(_desk_frame())
+        assert not self._detector_with(0.50).is_scene_empty(_desk_frame())
+
+    def test_a_cluttered_bare_desk_scoring_about_040_counts_as_empty(self):
+        # Real Pi desk: 0.39-0.41 with the page gone; it must not keep "remove the document" up.
+        for conf in (0.38, 0.40, 0.41, 0.44):
+            assert self._detector_with(conf).is_scene_empty(_desk_frame())
 
 
 class TestBorderAndRebaseline:

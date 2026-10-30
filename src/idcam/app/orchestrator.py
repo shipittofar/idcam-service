@@ -111,6 +111,7 @@ class ApplicationOrchestrator:
         self._next_recovery_at: float = 0.0
         self._recovery_in_progress = False
         self._removal_count = 0
+        self._removal_ticks = 0
         self._state_tick_running = False
         self._state_action_claimed: AppState | None = None
         self._error_backoff_claimed = False
@@ -1140,6 +1141,7 @@ class ApplicationOrchestrator:
         await asyncio.sleep(2.0)
         self._consecutive_failures = 0
         self._removal_count = 0
+        self._removal_ticks = 0
         self._last_scene_empty = False
         self._transition(AppState.WAITING_FOR_REMOVAL, reason="capture_success")
 
@@ -1161,8 +1163,19 @@ class ApplicationOrchestrator:
         if empty:
             self._removal_count += 1
         else:
-            self._removal_count = 0
+            # One noisy frame (a hand passing, a flicker near the threshold) must not restart the
+            # whole count; a page that is really still there keeps it at zero.
+            self._removal_count = max(0, self._removal_count - 1)
             self.sm.touch_progress()
+        self._removal_ticks += 1
+        if self._removal_ticks % 25 == 1:
+            logger.info(
+                "event=waiting_for_removal_progress empty=%s count=%d/%d confidence=%.2f",
+                empty,
+                self._removal_count,
+                self.config.detection.removal_frames_required,
+                self.detector.debug_info().geometry_confidence,
+            )
         self._publish_debug(frame)
 
         if self._removal_count >= self.config.detection.removal_frames_required:

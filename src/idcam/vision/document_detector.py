@@ -444,7 +444,7 @@ class DocumentDetector:
         A small margin under the detection threshold keeps a present page from flickering to empty.
         """
         geom = self._find_geometry(frame)
-        return geom is None or geom.confidence < self.config.min_geometry_confidence * 0.8
+        return geom is None or geom.confidence < self.config.min_geometry_confidence * self.config.scene_empty_factor
 
     def rebaseline_motion(self, frame: np.ndarray) -> None:
         """Re-measure the locked outline on a frame taken after focusing.

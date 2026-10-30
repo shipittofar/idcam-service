@@ -505,6 +505,39 @@ class TestUploadCopyOverlap:
         assert orch._capture_path == broken
 
 
+class TestRemovalCounting:
+    @pytest.mark.asyncio
+    async def test_one_noisy_frame_does_not_restart_the_removal_count(self, tmp_path):
+        orch = _orch(tmp_path)
+        orch.sm.state = AppState.WAITING_FOR_REMOVAL
+        orch._transaction = ActiveCaptureTransaction(capture_id="cap-rm")
+        orch._transaction.mark_completed()
+        orch._safe_preview = AsyncMock(return_value=_document())
+        need = orch.config.detection.removal_frames_required
+        flags = iter([True] * (need - 2) + [False] + [True] * 3)
+        orch.detector.is_scene_empty = MagicMock(side_effect=lambda frame: next(flags))
+        for _ in range(need - 2):
+            await orch._removal_tick()
+        assert orch._removal_count == need - 2
+        await orch._removal_tick()  # a noisy "page still there" frame
+        assert orch._removal_count == need - 3  # decays by one instead of resetting to zero
+        for _ in range(3):  # 7 -> 10
+            await orch._removal_tick()
+        assert orch.sm.state == AppState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_a_page_that_stays_never_counts_down_to_removed(self, tmp_path):
+        orch = _orch(tmp_path)
+        orch.sm.state = AppState.WAITING_FOR_REMOVAL
+        orch._transaction = ActiveCaptureTransaction(capture_id="cap-stay")
+        orch._transaction.mark_completed()
+        orch._safe_preview = AsyncMock(return_value=_document())
+        orch.detector.is_scene_empty = MagicMock(return_value=False)
+        for _ in range(30):
+            await orch._removal_tick()
+        assert orch.sm.state == AppState.WAITING_FOR_REMOVAL and orch._removal_count == 0
+
+
 def _document() -> np.ndarray:
     frame = np.full((120, 160, 3), 200, dtype=np.uint8)
     frame[20:100, 20:140] = 40

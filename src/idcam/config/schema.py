@@ -149,6 +149,9 @@ class DetectionConfig(BaseModel):
     removal_motion_factor: float = Field(0.5, gt=0, le=1.0)
     removal_edge_factor: float = Field(0.5, gt=0, le=2.0)
     min_geometry_confidence: float = Field(0.50, gt=0, le=1.0)
+    # The scene counts as empty (document removed) below min_geometry_confidence * this factor. A bare
+    # desk with cables or grain scores ~0.40 on real hardware, so the factor must leave room above it.
+    scene_empty_factor: float = Field(0.9, gt=0.3, le=1.0)
     geometry_min_area_fraction: float = Field(0.02, gt=0, le=1.0)  # passport-size page at 3% of the frame
     geometry_max_area_fraction: float = Field(0.85, gt=0, le=1.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)
