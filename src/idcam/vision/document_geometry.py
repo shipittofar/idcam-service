@@ -128,6 +128,44 @@ def _odd(value: float, minimum: int) -> int:
     return n if n % 2 else n + 1
 
 
+def _masked_background(small: np.ndarray, sigma: float, weight: np.ndarray | None = None) -> np.ndarray:
+    """Smooth background of a small image, averaging only over pixels with weight > 0.
+
+    Normalised convolution with a zero border: near the frame edge the average covers the real
+    pixels only (a reflected border mirrors a page in the corner and doubles its weight).
+    """
+    src = small.astype(np.float32)
+    if weight is None:
+        weight = np.ones(src.shape[:2], np.float32)
+    w = weight if src.ndim == 2 else weight[..., None]
+    num = cv2.GaussianBlur(src * w, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_CONSTANT)
+    den = cv2.GaussianBlur(weight, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_CONSTANT)
+    den = np.maximum(den, 1e-3)
+    return num / (den if src.ndim == 2 else den[..., None])
+
+
+def _two_pass_background(small: np.ndarray, sigma: float) -> np.ndarray:
+    """Background that ignores the page itself.
+
+    A plain blur of the whole frame is pulled towards the page, most of all when the page sits in
+    a corner or against an edge (little desk left in the window): the difference to the background
+    shrinks and a dark cover on a dark desk fades out. Pass 1 finds what stands out, pass 2
+    averages everything else.
+    """
+    bg1 = _masked_background(small, sigma)
+    diff = small.astype(np.float32) - bg1
+    dist = np.abs(diff) if diff.ndim == 2 else np.sqrt((diff**2).sum(axis=2))
+    if float(dist.max()) - float(dist.min()) < 1e-3:
+        return bg1
+    d8 = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    thresh, _ = cv2.threshold(d8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    standout = cv2.dilate((d8 > thresh).astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2)
+    weight = (1 - standout).astype(np.float32)
+    if float(weight.mean()) < 0.25:  # almost everything stands out: no usable background sample
+        return bg1
+    return _masked_background(small, sigma, weight)
+
+
 def _binary_variants(
     gray: np.ndarray, scale: float = 1.0, lab: np.ndarray | None = None
 ) -> list[tuple[str, np.ndarray]]:
@@ -162,8 +200,8 @@ def _binary_variants(
     # blur a 1/8 downscale and upsample (same result within ~1 grey level, ~300x faster).
     ds = 8
     small = cv2.resize(gray, (max(1, w // ds), max(1, h // ds)), interpolation=cv2.INTER_AREA)
-    small = cv2.GaussianBlur(small, (0, 0), sigmaX=sigma_bg / ds, sigmaY=sigma_bg / ds)
-    bg = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+    small = _two_pass_background(small, sigma_bg / ds)
+    bg = np.clip(cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR), 0, 255).astype(np.uint8)
     diff = cv2.absdiff(gray, bg)
     diff = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     for tag, tflag in (("bg_otsu", cv2.THRESH_BINARY), ("bg_otsu_inv", cv2.THRESH_BINARY_INV)):
@@ -175,10 +213,13 @@ def _binary_variants(
         # desk (or a beige page on a white desk) has almost no luminance contrast but a clear hue
         # difference, which the grey-level variants cannot see.
         small_lab = cv2.resize(lab, (max(1, w // ds), max(1, h // ds)), interpolation=cv2.INTER_AREA)
-        small_lab = cv2.GaussianBlur(small_lab, (0, 0), sigmaX=sigma_bg / ds, sigmaY=sigma_bg / ds)
+        small_lab = small_lab.astype(np.float32)
+        small_lab[..., 0] *= 100.0 / 255.0  # 8-bit L (0..255) -> L* units, like a and b
+        small_lab = _two_pass_background(small_lab, sigma_bg / ds)
         bg_lab = cv2.resize(small_lab, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
-        delta = lab.astype(np.float32) - bg_lab
-        delta[..., 0] *= 100.0 / 255.0  # 8-bit L (0..255) -> L* units, like a and b
+        delta = lab.astype(np.float32)
+        delta[..., 0] *= 100.0 / 255.0
+        delta -= bg_lab
         dist = cv2.GaussianBlur(np.sqrt((delta**2).sum(axis=2)), (0, 0), 1.2)
         if float(dist.max()) - float(dist.min()) >= _MIN_COLOR_RANGE:
             dist8 = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
@@ -365,7 +406,7 @@ def _score_geometry(
     cx = bx + bw // 2
     cy = by + bh // 2
     center_dist = math.hypot(cx - w / 2.0, cy - h / 2.0) / max(math.hypot(w / 2.0, h / 2.0), 1.0)
-    center_score = max(0.0, 1.0 - center_dist * 0.85)
+    center_score = max(0.0, 1.0 - center_dist * 0.35)  # fully visible pages in a corner must still pass
     aspect_target = 1.414
     aspect_score = max(0.0, 1.0 - min(abs(math.log(max(aspect, 1e-3) / aspect_target)), 1.2))
 

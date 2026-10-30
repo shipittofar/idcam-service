@@ -112,3 +112,45 @@ class TestPassportSizedDocuments:
         geom = _detect(img)
         assert geom is not None
         assert dg._bbox_iou((500, 100, 800, 850), geom.bbox) >= 0.9
+
+
+def _scene_at(kind: str, cover, width: int, cx: int, cy: int, angle: float = 8.0):
+    """Like ``_scene`` but with the booklet centred anywhere in the frame."""
+    img = _desk(kind, 1)
+    height = width * 88 / 125
+    r = np.deg2rad(angle)
+    rot = np.array([[np.cos(r), -np.sin(r)], [np.sin(r), np.cos(r)]])
+    corners = np.array([[-width / 2, -height / 2], [width / 2, -height / 2], [width / 2, height / 2], [-width / 2, height / 2]])
+    quad = corners @ rot.T + [cx, cy]
+    cv2.fillPoly(img, [quad.astype(np.int32)], cover)
+    x0, y0 = quad.min(0).astype(int)
+    for i in range(int(height / 14)):
+        cv2.putText(img, "PASSPORT 123456 <<<<", (x0 + 12, y0 + 20 + i * 14), cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                    tuple(int(c * 0.6) for c in cover), 1)
+    x1, y1 = quad.max(0)
+    return img, (int(x0), int(y0), int(x1 - x0), int(y1 - y0))
+
+
+POSITIONS = {
+    "centre": (960, 540), "left": (260, 540), "right": (1660, 540), "top": (960, 170), "bottom": (960, 910),
+    "top-left": (260, 170), "top-right": (1660, 170), "bottom-left": (260, 910), "bottom-right": (1660, 910),
+}
+
+
+class TestDocumentNearTheFrameEdges:
+    """A fully visible page in a corner or against a side must be detected like one in the middle
+    (the background estimate used to be dragged towards the page there, so a dark cover on a dark
+    desk faded out)."""
+
+    @pytest.mark.parametrize("position", list(POSITIONS))
+    @pytest.mark.parametrize("desk,cover", [("dark", BURGUNDY), ("dark", NAVY), ("wood", NAVY), ("wood", BURGUNDY)])
+    def test_detected_with_enough_confidence_anywhere_in_view(self, desk, cover, position):
+        img, truth = _scene_at(desk, cover, 330, *POSITIONS[position])
+        geom = _detect(img)
+        assert geom is not None, position
+        assert geom.confidence >= DetectionConfig().min_geometry_confidence, (position, geom.confidence)
+        assert dg._bbox_iou(truth, geom.bbox) >= 0.6
+
+    @pytest.mark.parametrize("desk", ["wood", "dark", "white"])
+    def test_an_empty_desk_still_yields_nothing(self, desk):
+        assert _detect(_desk(desk, 1)) is None
