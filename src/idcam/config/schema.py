@@ -168,7 +168,12 @@ class DetectionConfig(BaseModel):
     min_geometry_confidence: float = Field(0.50, gt=0, le=1.0)
     # The scene counts as empty (document removed) below min_geometry_confidence * this factor. A bare
     # desk with cables or grain scores ~0.40 on real hardware, so the factor must leave room above it.
-    scene_empty_factor: float = Field(0.9, gt=0.3, le=1.0)
+    scene_empty_factor: float = Field(0.94, gt=0.3, le=1.0)
+    # The frames that make up a detection must outline the SAME object: the bounding box of each frame
+    # overlaps the previous one by at least this IoU, else the count restarts. A cluttered empty desk
+    # produces a different best candidate every frame (cables, edges, shadows); a document sits still.
+    # 0 switches the check off.
+    detect_min_iou: float = Field(0.5, ge=0.0, le=1.0)
     geometry_min_area_fraction: float = Field(0.02, gt=0, le=1.0)  # passport-size page at 3% of the frame
     geometry_max_area_fraction: float = Field(0.85, gt=0, le=1.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)

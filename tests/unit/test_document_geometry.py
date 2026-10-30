@@ -428,3 +428,55 @@ class TestStaticSceneGate:
             for _ in range(20):
                 det.detect(frame.copy())
             assert 2 <= spy.call_count <= 3  # every 9th frame
+
+
+class TestSameObjectDetection:
+    """A detection needs the same outline in consecutive frames, not just a high score each time."""
+
+    @staticmethod
+    def _detector(**kwargs):
+        from types import SimpleNamespace
+
+        det = DocumentDetector(DetectionConfig(detect_frames_required=3, **kwargs))
+
+        def feed(bbox, conf=0.6):
+            geom = SimpleNamespace(confidence=conf, bbox=bbox, corners=((0, 0),) * 4, edge_strength=0.0, area_fraction=0.1)
+            det._find_geometry = lambda frame: geom  # type: ignore[method-assign]
+            return det.detect(np.zeros((120, 160, 3), np.uint8))
+
+        return det, feed
+
+    def test_a_different_best_candidate_every_frame_never_latches(self):
+        det, feed = self._detector()
+        boxes = [(100, 100, 400, 300), (900, 600, 300, 200), (300, 50, 500, 150), (1000, 800, 200, 250), (50, 700, 600, 200)]
+        assert not any(feed(b) for b in boxes * 3)
+
+    def test_the_same_outline_latches_after_the_required_frames(self):
+        det, feed = self._detector()
+        results = [feed((100, 100, 400, 300)) for _ in range(3)]
+        assert results == [False, False, True]
+
+    def test_small_jitter_and_slow_drift_still_count_as_one_object(self):
+        det, feed = self._detector()
+        results = [feed(b) for b in [(100, 100, 400, 300), (106, 98, 402, 301), (112, 104, 398, 297)]]
+        assert results[-1] is True
+
+    def test_one_jump_restarts_the_count(self):
+        det, feed = self._detector()
+        feed((100, 100, 400, 300))
+        feed((100, 100, 400, 300))
+        assert feed((900, 600, 300, 200)) is False  # would have been the third frame
+        assert feed((900, 600, 300, 200)) is False
+        assert feed((900, 600, 300, 200)) is True
+
+    def test_the_check_can_be_switched_off(self):
+        det, feed = self._detector(detect_min_iou=0.0)
+        boxes = [(100, 100, 400, 300), (900, 600, 300, 200), (300, 50, 500, 150)]
+        assert [feed(b) for b in boxes][-1] is True
+
+    def test_a_low_confidence_frame_in_between_resets_everything(self):
+        det, feed = self._detector()
+        feed((100, 100, 400, 300))
+        feed((100, 100, 400, 300))
+        feed((100, 100, 400, 300), conf=0.3)
+        assert feed((100, 100, 400, 300)) is False

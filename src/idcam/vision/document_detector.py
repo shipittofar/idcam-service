@@ -13,7 +13,7 @@ import numpy as np
 
 from idcam.config.schema import DetectionConfig
 from idcam.logging.setup import get_logger
-from idcam.vision.document_geometry import corner_motion, detect_document_geometry
+from idcam.vision.document_geometry import _bbox_iou, corner_motion, detect_document_geometry
 from idcam.vision.document_lock import DocumentLock
 from idcam.vision.motion import illumination_change, normalize_gray, structural_motion, to_gray
 from idcam.vision.sharpness import clip_roi, inner_roi, inscribed_focus_roi, roi_rect
@@ -115,6 +115,7 @@ class DocumentDetector:
         self._geometry_frame: np.ndarray | None = None
         self._gate_small: np.ndarray | None = None
         self._gate_reuse = 0
+        self._candidate_bbox: tuple[int, int, int, int] | None = None
         self.gate_hits = 0  # frames answered from the previous analysis (diagnostics / tests)
 
     @property
@@ -251,6 +252,7 @@ class DocumentDetector:
 
     def release_lock(self) -> None:
         self._gate_small = None
+        self._candidate_bbox = None
         self.lock.release()
         self._detected_latched = False
         self._present_frames = 0
@@ -383,6 +385,7 @@ class DocumentDetector:
 
     def reset_baseline(self) -> None:
         self._gate_small = None
+        self._candidate_bbox = None
         self._baseline_norm = None
         self._prev_norm = None
         self._present_frames = 0
@@ -443,7 +446,16 @@ class DocumentDetector:
             return True
 
         if geom and geom.confidence >= self.config.min_geometry_confidence:
-            self._present_frames += 1
+            same_object = (
+                self._candidate_bbox is None
+                or self.config.detect_min_iou <= 0.0
+                or _bbox_iou(self._candidate_bbox, geom.bbox) >= self.config.detect_min_iou
+            )
+            self._candidate_bbox = tuple(geom.bbox)  # type: ignore[assignment]
+            if same_object:
+                self._present_frames += 1
+            else:
+                self._present_frames = 1  # a different best candidate: start counting again
             if self._present_frames == 1:
                 self._first_seen_at = time.monotonic()
             self._absent_frames = 0
@@ -452,6 +464,7 @@ class DocumentDetector:
                 self._detected_latched = True
         else:
             self._present_frames = 0
+            self._candidate_bbox = None
             self._first_seen_at = None
             if self._detected_latched:
                 self._absent_frames += 1
