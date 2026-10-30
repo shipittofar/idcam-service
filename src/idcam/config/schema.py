@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 # First-install production template values. These are always rejected so the
 # service cannot look "ready" while still pointing at a placeholder endpoint.
@@ -114,10 +114,27 @@ class CameraConfig(BaseModel):
     af_wide_max: float = Field(16.0, ge=0, le=32)
     af_wide_step: float = Field(1.0, gt=0.1, le=4.0)
     capture_timeout_sec: float = Field(45.0, gt=0, le=300)
+    # Exposure / white balance. The defaults leave everything to the camera's automatic control.
+    # exposure_time_us (+ analogue_gain) switches auto exposure OFF and fixes both, preview and still:
+    # only sensible under constant light, and it must be measured on this device (see the
+    # exposure_us / gain values in the focus_sample and still_capture_metadata log lines).
+    exposure_time_us: int | None = Field(None, ge=100, le=1_000_000)
+    analogue_gain: float | None = Field(None, ge=1.0, le=64.0)  # needs exposure_time_us
+    # Automatic exposure only: brightness compensation in stops, and a preference for short exposures
+    # ("short" cuts motion blur at the price of more gain/noise).
+    exposure_value: float = Field(0.0, ge=-8.0, le=8.0)
+    ae_exposure_mode: Literal["normal", "short", "long"] = "normal"
+    awb_mode: Literal["auto", "tungsten", "fluorescent", "indoor", "daylight", "cloudy"] = "auto"
     # Time for the lens to reach the held position after the still stream starts; the saved
     # frame is the first one exposed after this.
     still_lens_settle_sec: float = Field(0.35, ge=0.0, le=3.0)
     recovery: CameraRecoveryConfig = CameraRecoveryConfig()
+
+    @model_validator(mode="after")
+    def _manual_exposure_needs_a_time(self) -> "CameraConfig":
+        if self.analogue_gain is not None and self.exposure_time_us is None:
+            raise ValueError("camera.analogue_gain needs camera.exposure_time_us (fixed exposure)")
+        return self
 
     @property
     def recovery_max_attempts(self) -> int:

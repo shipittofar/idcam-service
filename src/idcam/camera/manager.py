@@ -183,9 +183,16 @@ class CameraManager:
 
             try:
                 self._picam2 = Picamera2()
+                image_controls = self._image_controls()
+                advertised = set(self._picam2.camera_controls)
+                dropped = sorted(k for k in image_controls if k not in advertised)
+                if dropped:
+                    logger.warning("event=image_controls_unsupported controls=%s", dropped)
+                    image_controls = {k: v for k, v in image_controls.items() if k in advertised}
                 self._preview_config = self._picam2.create_preview_configuration(
                     main={"size": (self.config.preview_width, self.config.preview_height), "format": "RGB888"},
                     buffer_count=4,
+                    controls=dict(image_controls),
                 )
                 self._still_config = self._picam2.create_still_configuration(
                     main={
@@ -193,7 +200,10 @@ class CameraManager:
                         "format": "RGB888",
                     },
                     buffer_count=2,
+                    controls=dict(image_controls),
                 )
+                if image_controls:
+                    logger.info("event=image_controls %s", image_controls)
                 self._picam2.configure(self._preview_config)
                 self._picam2.start()
                 self._started = True
@@ -582,6 +592,30 @@ class CameraManager:
                     self._set_controls_unlocked({"AfMode": self._af_mode_manual(), "LensPosition": lens})
                     self._held_lens = float(lens)
                     logger.info("event=autofocus_result method=hold_lens_position lens_position=%s", lens)
+
+    def _image_controls(self) -> dict[str, Any]:
+        """Exposure / white-balance controls from the config ({} = fully automatic, the default).
+
+        They go into both stream configurations, so they apply to the preview and to the still
+        (the camera is reconfigured between the two) without being re-sent.
+        """
+        cfg = self.config
+        controls: dict[str, Any] = {}
+        if cfg.exposure_time_us is not None:
+            controls["AeEnable"] = False
+            controls["ExposureTime"] = int(cfg.exposure_time_us)
+            controls["AnalogueGain"] = float(cfg.analogue_gain if cfg.analogue_gain is not None else 1.0)
+        else:
+            if cfg.exposure_value:
+                controls["ExposureValue"] = float(cfg.exposure_value)
+            if cfg.ae_exposure_mode != "normal":
+                modes = {"short": ("Short", 1), "long": ("Long", 2)}
+                name, fallback = modes[cfg.ae_exposure_mode]
+                controls["AeExposureMode"] = self._af_enum("AeExposureModeEnum", name, fallback)
+        if cfg.awb_mode != "auto":
+            awb = {"tungsten": 1, "fluorescent": 2, "indoor": 3, "daylight": 4, "cloudy": 5}
+            controls["AwbMode"] = self._af_enum("AwbModeEnum", cfg.awb_mode.capitalize(), awb[cfg.awb_mode])
+        return controls
 
     def _af_enum(self, group: str, name: str, fallback: int) -> int:
         if controls is None:

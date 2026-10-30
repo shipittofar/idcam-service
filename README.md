@@ -164,6 +164,10 @@ See `config.example.yaml`. Key settings:
 
 Environment overrides: `IDCAM_CONFIG`, `IDCAM_AUTH_TOKEN`, `IDCAM_DEVICE_ID`, `IDCAM_SERVER_URL`, `IDCAM_ENV`, `IDCAM_MOCK_CAMERA`.
 
+## Exposure and white balance
+
+Everything is automatic by default. Under `camera:` you can set `exposure_value` (brightness compensation in stops), `ae_exposure_mode: short` (shorter exposures, less motion blur), `awb_mode`, or fix the exposure with `exposure_time_us` (+ `analogue_gain`), which switches auto exposure off for the preview and the still. A fixed exposure only makes sense under constant light: first read `exposure_us` / `gain` in the `focus_sample` and `still_capture_metadata` log lines. Controls the camera does not advertise are dropped with a warning (`image_controls_unsupported`).
+
 ## Live Debug Viewer
 
 Optional development viewer. **Disabled by default** (`debug.enabled: false`). It is not required for capture.

@@ -48,6 +48,13 @@ camera:
   capture_height: 6944
   jpeg_quality: 95
   preview_fps: 5
+  # Exposure / white balance: all automatic unless set. See the exposure_us / gain values in the
+  # focus_sample and still_capture_metadata log lines before fixing anything.
+  # exposure_time_us: 8000   # fixed exposure (auto exposure OFF) for the preview AND the still ...
+  # analogue_gain: 2.0       # ... with this gain (1.0 when omitted); only under constant light
+  # exposure_value: 0.0      # auto exposure only: brightness compensation in stops (-8..8)
+  # ae_exposure_mode: normal # normal | short (less motion blur, more noise) | long
+  # awb_mode: auto           # auto | tungsten | fluorescent | indoor | daylight | cloudy
   # Focus mode: "auto" (hardware AF + lens search) or "manual" (AF off; pick the lens in the debug panel
   # at /preview/live, press "Confirm & save"; the value is stored in manual_focus.json and reused). Needs debug.enabled.
   focus_mode: auto
