@@ -292,7 +292,7 @@ class TestBlurKillsEdgeDensity:
 
 
 class TestStabilitySensitivity:
-    """stability_sensitivity 0.6 (default) = 40 % less sensitive to page movement than 1.0."""
+    """stability_sensitivity 0.4 (default) = 60 % less sensitive to page movement than 1.0."""
 
     @staticmethod
     def _run(sensitivity, motion):
@@ -305,19 +305,19 @@ class TestStabilitySensitivity:
             results = [sd.update(frame) for _ in range(6)]
         return results[-1], sd
 
-    def test_default_is_forty_percent_less_sensitive(self):
-        assert DetectionConfig().stability_sensitivity == 0.6
-        _stable, sd = self._run(0.6, 0.0)
-        assert sd.effective_motion_threshold == pytest.approx(8.0 / 0.6)
+    def test_default_is_sixty_percent_less_sensitive(self):
+        assert DetectionConfig().stability_sensitivity == 0.4
+        _stable, sd = self._run(0.4, 0.0)
+        assert sd.effective_motion_threshold == pytest.approx(8.0 / 0.4)
 
     def test_motion_between_the_old_and_new_threshold_no_longer_breaks_stability(self):
-        stable_new, _ = self._run(0.6, 10.0)  # 8 < 10 < 13.3
+        stable_new, _ = self._run(0.4, 10.0)  # 8 < 10 < 20
         stable_old, _ = self._run(1.0, 10.0)
         assert stable_new is True
         assert stable_old is False
 
     def test_real_movement_still_resets(self):
-        stable, sd = self._run(0.6, 14.0)  # above the relaxed threshold
+        stable, sd = self._run(0.4, 22.0)  # above the relaxed threshold
         assert stable is False and sd.stable_count == 0
 
     def test_original_behaviour_is_available_with_sensitivity_one(self):

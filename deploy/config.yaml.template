@@ -66,6 +66,7 @@ detection:
   motion_threshold: 8.0
   edge_density_threshold: 0.02
   stable_frames_required: 8
+  stability_sensitivity: 0.4     # 1.0 = original tolerance; lower = less sensitive to page movement
   removal_frames_required: 10
   removal_motion_factor: 0.5
   removal_edge_factor: 0.5

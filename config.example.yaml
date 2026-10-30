@@ -70,7 +70,7 @@ detection:
   motion_threshold: 8.0
   edge_density_threshold: 0.02
   stable_frames_required: 8
-  stability_sensitivity: 0.6     # 1.0 = original motion tolerance; 0.6 = 40% less sensitive
+  stability_sensitivity: 0.4     # 1.0 = original motion tolerance; 0.4 = 60% less sensitive (threshold 8/0.4 = 20)
   removal_frames_required: 10
   removal_motion_factor: 0.5
   removal_edge_factor: 0.5
