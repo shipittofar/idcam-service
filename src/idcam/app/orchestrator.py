@@ -605,11 +605,13 @@ class ApplicationOrchestrator:
                 force_auto=True,
             )
         except AutofocusError as exc:
+            logger.warning("event=manual_focus_search_failed error=%s", exc)
             if previous is not None:
                 self.camera.set_manual_lens(previous)
             return {"ok": False, "status": "error", "message": f"No sharp position found: {exc}"}
         lens = valid_lens(result.lens_after)
         if lens is None:
+            logger.warning("event=manual_focus_search_failed error=no_lens_position_reported method=%s", result.method)
             if previous is not None:
                 self.camera.set_manual_lens(previous)
             return {"ok": False, "status": "error", "message": "The camera did not report a lens position"}
