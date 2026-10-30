@@ -461,8 +461,12 @@ class ApplicationOrchestrator:
             self._clear_scene_count = 0
         if detected:
             logger.info(
-                "event=document_detected confidence=%.2f motion=%.2f edge_density=%.4f latency_ms=%d",
+                "event=document_detected confidence=%.2f area=%.3f roi=%s led=%s motion=%.2f edge_density=%.4f "
+                "latency_ms=%d",
                 self.detector.debug_info().geometry_confidence,
+                getattr(self.detector._last_geometry, "area_fraction", 0.0),
+                self.detector.debug_info().document_roi,
+                "on" if self.led.config.enabled else "off",
                 self.detector.last_motion,
                 self.detector.last_edge_density,
                 self.detector.detection_latency_ms,
