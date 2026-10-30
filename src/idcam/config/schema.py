@@ -137,7 +137,9 @@ class DetectionConfig(BaseModel):
     # (the motion thresholds of the stability wait and of the pre-capture check are divided by it).
     stability_sensitivity: float = Field(0.4, gt=0.1, le=1.0)
     removal_frames_required: int = Field(10, ge=2, le=120)
-    detect_frames_required: int = Field(3, ge=1, le=30)
+    # A document counts as present only after this many consecutive frames with an outline at or above
+    # min_geometry_confidence. Raise both to react to fewer non-documents (hand, shadow, desk edge).
+    detect_frames_required: int = Field(5, ge=1, le=30)
     lose_frames_required: int = Field(5, ge=1, le=60)
     lose_motion_factor: float = Field(0.55, gt=0, le=1.0)
     lose_edge_factor: float = Field(0.55, gt=0, le=2.0)
@@ -146,7 +148,7 @@ class DetectionConfig(BaseModel):
     roi_smooth_alpha: float = Field(0.25, gt=0.05, le=1.0)
     removal_motion_factor: float = Field(0.5, gt=0, le=1.0)
     removal_edge_factor: float = Field(0.5, gt=0, le=2.0)
-    min_geometry_confidence: float = Field(0.42, gt=0, le=1.0)
+    min_geometry_confidence: float = Field(0.50, gt=0, le=1.0)
     geometry_min_area_fraction: float = Field(0.02, gt=0, le=1.0)  # passport-size page at 3% of the frame
     geometry_max_area_fraction: float = Field(0.85, gt=0, le=1.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)
