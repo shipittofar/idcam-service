@@ -47,6 +47,22 @@ class ImageValidator:
         self.config = quality_config
         self.camera_config = camera_config
 
+    def _min_file_bytes(self, path: Path) -> int:
+        """``min_file_bytes``, lowered for small images.
+
+        The limit exists to catch empty/truncated files. It was set for 64 MP stills; a 1280x720 JPEG
+        of a plain desk is only ~60-80 kB and was rejected as "too small" although it was fine. The
+        limit never exceeds ~3 % of the pixel count (JPEG at normal quality needs more than that for
+        any real scene), with a floor of 5 kB.
+        """
+        limit = int(self.config.min_file_bytes)
+        try:
+            with Image.open(path) as probe:
+                width, height = probe.size
+        except Exception:
+            return limit  # unreadable: the later checks report it
+        return min(limit, max(5_000, int(width * height * 0.03)))
+
     def validate(
         self,
         path: Path,
@@ -62,8 +78,9 @@ class ImageValidator:
             raise ImageValidationError(f"Not a regular file: {path}")
 
         file_bytes = path.stat().st_size
-        if file_bytes < self.config.min_file_bytes:
-            raise ImageValidationError(f"File too small: {file_bytes} bytes")
+        min_bytes = self._min_file_bytes(path)
+        if file_bytes < min_bytes:
+            raise ImageValidationError(f"File too small: {file_bytes} bytes (minimum {min_bytes} for this image size)")
         if file_bytes > self.config.max_file_bytes:
             raise ImageValidationError(f"File too large: {file_bytes} bytes")
 

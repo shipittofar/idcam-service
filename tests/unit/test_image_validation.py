@@ -140,3 +140,44 @@ class TestDocumentJudgedByDocumentSharpness:
             ImageValidator(QualityConfig(min_file_bytes=1000)).validate(
                 path, document_roi=self.DOC, preview_size=self.PREVIEW, scaler_crop=self.CROP
             )
+
+
+class TestMinimumFileSizeScalesWithTheImage:
+    @staticmethod
+    def _jpeg(tmp_path, size, quality, noise=0):
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        w, h = size
+        arr = np.full((h, w, 3), 120, np.uint8)
+        cv2.rectangle(arr, (w // 5, h // 5), (w * 4 // 5, h * 4 // 5), (220, 220, 215), -1)
+        for i in range(6):
+            cv2.line(arr, (w // 4, h // 4 + i * h // 12), (w * 3 // 4, h // 4 + i * h // 12), (40, 40, 40), max(1, h // 150))
+        if noise:
+            rng = np.random.default_rng(5)
+            arr = np.clip(arr.astype(np.int16) + rng.integers(-noise, noise + 1, arr.shape), 0, 255).astype(np.uint8)
+        path = tmp_path / "x.jpg"
+        Image.fromarray(arr).save(path, format="JPEG", quality=quality)
+        return path
+
+    def test_a_small_but_valid_capture_is_not_rejected_by_the_default_limit(self, tmp_path):
+        path = self._jpeg(tmp_path, (1280, 720), 85, noise=4)
+        assert 27_700 < path.stat().st_size < 100_000  # under the 64 MP-era default, over 3 % of the pixels
+        result = ImageValidator(QualityConfig(min_sharpness=1.0, min_document_sharpness=1.0)).validate(path)
+        assert (result.width, result.height) == (1280, 720)
+
+    def test_the_configured_limit_still_applies_to_large_images(self, tmp_path):
+        path = self._jpeg(tmp_path, (4200, 3000), 10)
+        assert path.stat().st_size < 300_000
+        with pytest.raises(ImageValidationError, match="too small"):
+            ImageValidator(QualityConfig(min_file_bytes=300_000)).validate(path)
+
+    def test_an_almost_empty_file_is_still_too_small_whatever_the_size(self, tmp_path):
+        from PIL import Image
+
+        path = tmp_path / "flat.jpg"
+        Image.new("RGB", (1280, 720), (128, 128, 128)).save(path, format="JPEG", quality=30)
+        assert path.stat().st_size < 27_000  # under 3 % of the pixel count
+        with pytest.raises(ImageValidationError, match="too small"):
+            ImageValidator(QualityConfig()).validate(path)
