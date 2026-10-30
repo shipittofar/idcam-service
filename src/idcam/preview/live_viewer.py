@@ -340,7 +340,7 @@ _HTML_PAGE = """<!DOCTYPE html>
           <dt>Saved value</dt><dd id="focus_saved">not saved yet</dd>
         </dl>
         <button id="focus_find" type="button">Find best focus</button>
-        <small>Put the document where it will be used first; the search takes a few seconds and does not save.</small>
+        <small>Put the document where it will be used first; the search takes about 30 seconds (keep it still) and does not save.</small>
         <button id="focus_save" type="button">Confirm &amp; save</button>
         <div id="focus_msg" class="manual"></div>
       </section>
@@ -415,7 +415,7 @@ _HTML_PAGE = """<!DOCTYPE html>
       const btn = el("focus_find");
       btn.disabled = true;
       box.className = "manual";
-      box.textContent = "Searching for the sharpest position...";
+      box.textContent = "Searching for the sharpest position (about 30 s, keep the document still)...";
       try {
         const r = await fetch("/preview/focus", {
           method: "POST", cache: "no-store",

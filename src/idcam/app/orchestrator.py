@@ -18,6 +18,7 @@ from idcam.app.transaction import ActiveCaptureTransaction, TransactionPhase
 from idcam.camera.autofocus import AutofocusController
 from idcam.camera.capture import CaptureService
 from idcam.camera.manager import CameraManager
+from idcam.camera.lens_search import find_sharpest_lens
 from idcam.camera.manual_focus import ManualFocusStore, valid_lens
 from idcam.camera.quality import ImageValidator
 from idcam.camera.upload_image import prepare_upload_image
@@ -583,7 +584,7 @@ class ApplicationOrchestrator:
         self._finding_focus = True
         try:
             future = asyncio.run_coroutine_threadsafe(self._find_manual_focus(), loop)
-            return future.result(timeout=60.0)
+            return future.result(timeout=150.0)
         except Exception as exc:
             logger.warning("event=manual_focus_search_failed error=%s", exc)
             return {"ok": False, "status": "error", "message": "Focus search failed; see the log"}
@@ -596,27 +597,23 @@ class ApplicationOrchestrator:
         if frame is None:
             return {"ok": False, "status": "error", "message": "No camera frame"}
         roi = self.detector.focus_preview_roi(frame)
-        logger.info("event=manual_focus_search_started roi=%s", roi)
+        lo, hi = self.camera.lens_position_range()
+        logger.info("event=manual_focus_search_started roi=%s range=%.1f..%.1f", roi, lo, hi)
         try:
-            result = await self.autofocus.run_autofocus(
-                self.camera,
-                roi_fraction=self.config.detection.roi_center_fraction,
-                preview_roi=roi,
-                force_auto=True,
-            )
+            result = await asyncio.to_thread(find_sharpest_lens, self.camera, roi, lo, hi)
         except AutofocusError as exc:
             logger.warning("event=manual_focus_search_failed error=%s", exc)
             if previous is not None:
                 self.camera.set_manual_lens(previous)
             return {"ok": False, "status": "error", "message": f"No sharp position found: {exc}"}
-        lens = valid_lens(result.lens_after)
-        if lens is None:
-            logger.warning("event=manual_focus_search_failed error=no_lens_position_reported method=%s", result.method)
-            if previous is not None:
-                self.camera.set_manual_lens(previous)
-            return {"ok": False, "status": "error", "message": "The camera did not report a lens position"}
-        lens = self.camera.set_manual_lens(lens)
-        logger.info("event=manual_focus_found lens=%.3f sharpness=%.1f method=%s", lens, result.sharpness, result.method)
+        lens = self.camera.set_manual_lens(result.lens)
+        logger.info(
+            "event=manual_focus_found lens=%.3f sharpness=%.1f peak_ratio=%.1f samples=%d",
+            lens,
+            result.sharpness,
+            result.peak_ratio,
+            result.samples,
+        )
         return {
             "ok": True,
             "status": "found",

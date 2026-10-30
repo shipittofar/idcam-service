@@ -443,6 +443,34 @@ class CameraManager:
             return
         self._picam2.set_controls(filtered)
 
+    def probe_lens(self, position: float, settle_sec: float = 0.7) -> tuple[np.ndarray, dict[str, Any]]:
+        """Move the lens, wait for it, and return a preview frame exposed after the wait plus its metadata.
+
+        For the lens search: the metadata comes from the very request the frame was taken from, so the
+        reported LensPosition shows whether the lens really arrived.
+        """
+        with self._lock:
+            if not self._started:
+                raise CameraError("Camera not started")
+            if self._use_mock:
+                return self._mock_frame(), {"LensPosition": float(position)}
+            assert self._picam2 is not None
+            self._set_controls_unlocked({"AfMode": self._af_mode_manual(), "LensPosition": float(position)})
+            self._held_lens = float(position)
+            time.sleep(max(0.0, float(settle_sec)))
+            t0 = _boottime_ns()
+            deadline = time.monotonic() + 3.0
+            while True:
+                request = self._picam2.capture_request()
+                try:
+                    meta = dict(request.get_metadata())
+                    stamp = meta.get("SensorTimestamp")
+                    if t0 is None or stamp is None or stamp >= t0 or time.monotonic() >= deadline:
+                        native = np.array(request.make_array("main"))
+                        return normalize_picamera_preview_frame(native), meta
+                finally:
+                    request.release()
+
     def current_scaler_crop(self) -> tuple[int, int, int, int]:
         """Live stream crop on the sensor, else ScalerCropMaximum, else preview size."""
         with self._lock:

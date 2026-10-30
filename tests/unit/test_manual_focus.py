@@ -7,7 +7,7 @@ import json
 import socket
 import urllib.error
 import urllib.request
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -386,6 +386,8 @@ class TestFocusingStateIsSkipped:
 class TestFindBestFocus:
     @pytest.mark.asyncio
     async def test_search_applies_the_best_lens_without_saving_it(self, tmp_path):
+        from idcam.camera.lens_search import LensSearchResult
+
         orch = _orch(tmp_path, focus_mode="manual")
         orch.camera.initialize()
         orch.camera.set_manual_lens(8.0)
@@ -394,16 +396,15 @@ class TestFindBestFocus:
         orch._safe_preview = AsyncMock(return_value=_document())
         seen = {}
 
-        async def fake_af(camera, **kwargs):
-            seen.update(kwargs)
-            seen["busy_during"] = orch._finding_focus
-            return AutofocusResult(True, 120.0, 1, 0, "test", 10.0, lens_after=9.4)
+        def fake_search(camera, roi, lo, hi, **kwargs):
+            seen.update(lo=lo, hi=hi, busy_during=orch._finding_focus)
+            return LensSearchResult(9.4, 2000.0, 8.0, 40, True)
 
-        orch.autofocus.run_autofocus = fake_af
-        result = await asyncio.to_thread(orch.find_manual_focus)
+        with patch("idcam.app.orchestrator.find_sharpest_lens", fake_search):
+            result = await asyncio.to_thread(orch.find_manual_focus)
 
         assert result["ok"] and result["status"] == "found" and result["lens_position"] == 9.4
-        assert seen["force_auto"] is True and seen["busy_during"] is True
+        assert seen["busy_during"] is True and (seen["lo"], seen["hi"]) == (0.0, 32.0)
         assert orch.camera.get_manual_lens() == 9.4
         assert orch.manual_focus_store.load() is None  # only "Confirm & save" persists
         assert orch._finding_focus is False
@@ -416,8 +417,12 @@ class TestFindBestFocus:
         orch.sm.state = AppState.IDLE
         orch._event_loop = asyncio.get_running_loop()
         orch._safe_preview = AsyncMock(return_value=_document())
-        orch.autofocus.run_autofocus = AsyncMock(side_effect=AutofocusError("no peak"))
-        result = await asyncio.to_thread(orch.find_manual_focus)
+
+        def failing(*a, **k):
+            raise AutofocusError("no peak")
+
+        with patch("idcam.app.orchestrator.find_sharpest_lens", failing):
+            result = await asyncio.to_thread(orch.find_manual_focus)
         assert not result["ok"] and "no peak" in result["message"]
         assert orch.camera.get_manual_lens() == 8.0 and orch._finding_focus is False
 
