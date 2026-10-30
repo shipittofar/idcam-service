@@ -132,14 +132,14 @@ class DetectionConfig(BaseModel):
     roi_center_fraction: float = Field(0.7, gt=0.1, le=1.0)
     motion_threshold: float = Field(8.0, gt=0)
     edge_density_threshold: float = Field(0.02, gt=0, le=1.0)
-    stable_frames_required: int = Field(8, ge=2, le=60)
+    stable_frames_required: int = Field(5, ge=2, le=60)
     # 1.0 = the original motion tolerance; 0.6 = 40 % less sensitive to movement of the page
     # (the motion thresholds of the stability wait and of the pre-capture check are divided by it).
     stability_sensitivity: float = Field(0.4, gt=0.1, le=1.0)
     removal_frames_required: int = Field(10, ge=2, le=120)
     # A document counts as present only after this many consecutive frames with an outline at or above
     # min_geometry_confidence. Raise both to react to fewer non-documents (hand, shadow, desk edge).
-    detect_frames_required: int = Field(5, ge=1, le=30)
+    detect_frames_required: int = Field(3, ge=1, le=30)
     lose_frames_required: int = Field(5, ge=1, le=60)
     lose_motion_factor: float = Field(0.55, gt=0, le=1.0)
     lose_edge_factor: float = Field(0.55, gt=0, le=2.0)

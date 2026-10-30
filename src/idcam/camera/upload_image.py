@@ -83,7 +83,7 @@ def prepare_upload_image(
                 Image.LANCZOS,
             )
 
-        image.save(dst, format="JPEG", quality=cfg.jpeg_quality, optimize=True)
+        image.save(dst, format="JPEG", quality=cfg.jpeg_quality)  # no optimize: a second pass for ~2 % size
         out_w, out_h = image.size
 
     return PreparedImage(

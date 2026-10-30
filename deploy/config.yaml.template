@@ -65,7 +65,7 @@ detection:
   roi_center_fraction: 0.7
   motion_threshold: 8.0
   edge_density_threshold: 0.02
-  stable_frames_required: 8
+  stable_frames_required: 5
   stability_sensitivity: 0.4     # 1.0 = original tolerance; lower = less sensitive to page movement
   removal_frames_required: 10
   removal_motion_factor: 0.5

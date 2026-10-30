@@ -168,7 +168,10 @@ class AutofocusController:
         roi_fraction: float = 0.7,
         preview_roi: tuple[int, int, int, int] | None = None,
         sharpness_threshold: float | None = None,
+        force_auto: bool = False,
     ) -> AutofocusResult:
+        """Focus on the document. ``force_auto`` runs the automatic search even in manual focus mode
+        (the panel's "Find best focus" button); captures never pass it."""
         t_start = time.monotonic()
         floor = float(
             sharpness_threshold if sharpness_threshold is not None else self.quality.preview_min_sharpness
@@ -203,7 +206,7 @@ class AutofocusController:
             lens_before,
         )
 
-        if self.config.focus_mode == "manual":
+        if self.config.focus_mode == "manual" and not force_auto:
             return await self._run_manual_focus(
                 camera, roi, sensor, preview_size, before, floor, lens_before, t_start, t_prep
             )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import urllib.error
@@ -14,7 +15,7 @@ import pytest
 from idcam.app.orchestrator import ApplicationOrchestrator
 from idcam.app.state_machine import AppState
 from idcam.app.transaction import ActiveCaptureTransaction
-from idcam.camera.autofocus import AutofocusController
+from idcam.camera.autofocus import AutofocusController, AutofocusResult
 from idcam.camera.manager import CameraManager
 from idcam.camera.manual_focus import ManualFocusStore, valid_lens
 from idcam.config.schema import AppConfig, CameraConfig, DebugConfig, ServerConfig, UIConfig
@@ -380,6 +381,128 @@ class TestFocusingStateIsSkipped:
         orch._safe_preview = AsyncMock(return_value=_document())
         await orch._document_detected_tick()
         assert orch.sm.state == AppState.CAPTURING
+
+
+class TestFindBestFocus:
+    @pytest.mark.asyncio
+    async def test_search_applies_the_best_lens_without_saving_it(self, tmp_path):
+        orch = _orch(tmp_path, focus_mode="manual")
+        orch.camera.initialize()
+        orch.camera.set_manual_lens(8.0)
+        orch.sm.state = AppState.IDLE
+        orch._event_loop = asyncio.get_running_loop()
+        orch._safe_preview = AsyncMock(return_value=_document())
+        seen = {}
+
+        async def fake_af(camera, **kwargs):
+            seen.update(kwargs)
+            seen["busy_during"] = orch._finding_focus
+            return AutofocusResult(True, 120.0, 1, 0, "test", 10.0, lens_after=9.4)
+
+        orch.autofocus.run_autofocus = fake_af
+        result = await asyncio.to_thread(orch.find_manual_focus)
+
+        assert result["ok"] and result["status"] == "found" and result["lens_position"] == 9.4
+        assert seen["force_auto"] is True and seen["busy_during"] is True
+        assert orch.camera.get_manual_lens() == 9.4
+        assert orch.manual_focus_store.load() is None  # only "Confirm & save" persists
+        assert orch._finding_focus is False
+
+    @pytest.mark.asyncio
+    async def test_failed_search_restores_the_previous_lens(self, tmp_path):
+        orch = _orch(tmp_path, focus_mode="manual")
+        orch.camera.initialize()
+        orch.camera.set_manual_lens(8.0)
+        orch.sm.state = AppState.IDLE
+        orch._event_loop = asyncio.get_running_loop()
+        orch._safe_preview = AsyncMock(return_value=_document())
+        orch.autofocus.run_autofocus = AsyncMock(side_effect=AutofocusError("no peak"))
+        result = await asyncio.to_thread(orch.find_manual_focus)
+        assert not result["ok"] and "no peak" in result["message"]
+        assert orch.camera.get_manual_lens() == 8.0 and orch._finding_focus is False
+
+    def test_rejected_in_auto_mode_and_while_a_capture_runs(self, tmp_path):
+        assert _orch(tmp_path).find_manual_focus()["status"] == "disabled"
+        orch = _orch(tmp_path, focus_mode="manual")
+        orch._event_loop = None
+        assert orch.find_manual_focus()["status"] == "error"
+        orch._event_loop = MagicMock()
+        orch._event_loop.is_running.return_value = True
+        orch.sm.state = AppState.CAPTURING
+        assert orch.find_manual_focus()["status"] == "busy"
+
+    @pytest.mark.asyncio
+    async def test_idle_tick_does_nothing_during_the_search(self, tmp_path):
+        orch = _orch(tmp_path, focus_mode="manual")
+        orch.sm.state = AppState.IDLE
+        orch._finding_focus = True
+        orch._safe_preview = AsyncMock(return_value=_document())
+        await orch._idle_tick()
+        orch._safe_preview.assert_not_called()
+        assert orch.focus_status()["busy"] is True
+
+    def test_panel_auto_request_goes_to_the_auto_handler(self, viewer):
+        calls = []
+        viewer.set_focus_handlers(
+            lambda: dict(MANUAL_STATUS),
+            lambda lens, save: {"ok": True, "status": "applied"},
+            lambda: calls.append(1) or {"ok": True, "status": "found", "message": "ok", "lens_position": 9.4},
+        )
+        code, payload = _post(viewer, {"auto": True})
+        assert code == 200 and payload["status"] == "found" and payload["lens_position"] == 9.4
+        assert calls == [1]
+
+    def test_panel_auto_request_without_handler_is_unavailable(self, viewer):
+        viewer.set_focus_handlers(lambda: dict(MANUAL_STATUS), lambda lens, save: {"ok": True, "status": "applied"})
+        code, payload = _post(viewer, {"auto": True})
+        assert code == 503 and payload["status"] == "unavailable"
+
+    def test_page_has_the_find_button(self, viewer):
+        with urllib.request.urlopen(_url(viewer, "/preview/live"), timeout=3) as resp:
+            assert "Find best focus" in resp.read().decode()
+
+
+class TestUploadCopyOverlap:
+    @staticmethod
+    def _jpeg(orch, size=(1600, 1200)):
+        from PIL import Image
+
+        path = orch.temp_store.create_temp_path()
+        Image.new("RGB", size, (180, 180, 180)).save(path, format="JPEG", quality=90)
+        return path
+
+    @pytest.mark.asyncio
+    async def test_copy_is_built_during_validation_and_used_for_the_upload(self, tmp_path):
+        orch = _orch(tmp_path)
+        original = self._jpeg(orch)
+        orch._capture_path = original
+        orch._start_upload_copy(original, (200, 150, 800, 600), (800, 600), None)
+        assert orch._upload_crop_roi is not None and orch._upload_copy_task is not None
+        await orch._use_upload_copy()
+        assert orch._capture_path != original and orch._capture_path.exists()
+        assert not original.exists()  # the full-size capture is deleted once the copy replaces it
+        assert orch._upload_copy_task is None
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_image_leaves_no_copy_behind(self, tmp_path):
+        orch = _orch(tmp_path)
+        original = self._jpeg(orch)
+        orch._start_upload_copy(original, (200, 150, 800, 600), (800, 600), None)
+        task = orch._upload_copy_task
+        await orch._discard_upload_copy()
+        prepared = await task
+        assert prepared is None or not prepared.path.exists()
+        assert orch._upload_copy_task is None
+
+    @pytest.mark.asyncio
+    async def test_unreadable_image_falls_back_to_the_original(self, tmp_path):
+        orch = _orch(tmp_path)
+        broken = orch.temp_store.create_temp_path()
+        broken.write_bytes(b"not a jpeg")
+        orch._capture_path = broken
+        orch._start_upload_copy(broken, (0, 0, 100, 100), (800, 600), None)
+        await orch._use_upload_copy()
+        assert orch._capture_path == broken
 
 
 def _document() -> np.ndarray:

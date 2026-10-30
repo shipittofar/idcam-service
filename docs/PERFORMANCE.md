@@ -45,6 +45,18 @@ Upload preparation and upload were not reliably measured.
 Not changed on purpose: capture resolution (64 MP), JPEG settings, sharpness thresholds, LED
 brightness (0.2), detection defaults. See "Experimental profile".
 
+### Later trims (not yet measured on the Pi)
+
+* `detection.stable_frames_required` 8 -> 5 and `detect_frames_required` 5 -> 3 (a document must still
+  reach `min_geometry_confidence` 0.50, which is what keeps non-documents out). At ~5 fps each frame
+  is ~0.2 s, so this is ~0.6 s less before the capture.
+* The upload copy (crop + resize + JPEG) is built in a worker thread **while** the full image is
+  validated; they only read the file, so the ~0.8 s copy and the ~0.5 s validation overlap.
+  A rejected image discards the copy. JPEG `optimize` is off (one encode pass).
+* Manual focus mode skips the FOCUSING state entirely (no focus step at all).
+* Remaining big blocks: the still capture (~2-3 s at 64 MP) and the per-frame detection cost
+  (~0.1 s on a PC, several times that on the Pi). Judge with `scripts/timing_report.py`.
+
 ## Autofocus decision logic
 
 1. Prepare: fresh frame, set the AF window on the document (≈ 0.3 s).

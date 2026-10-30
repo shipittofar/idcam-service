@@ -10,6 +10,8 @@ import threading
 import time
 from pathlib import Path
 
+from PIL import Image
+
 from idcam import __version__
 from idcam.app.state_machine import AppState, StateMachine
 from idcam.app.transaction import ActiveCaptureTransaction, TransactionPhase
@@ -89,6 +91,8 @@ class ApplicationOrchestrator:
         self.autofocus = AutofocusController(config.camera, config.quality)
         # Manual focus (camera.focus_mode: manual): autofocus off, lens value set in the debug panel.
         self._manual_focus = config.camera.focus_mode == "manual"
+        self._finding_focus = False  # the panel's "Find best focus" search is running
+        self._event_loop: asyncio.AbstractEventLoop | None = None
         self.manual_focus_store = ManualFocusStore(
             config.camera.manual_focus_file or (config.temp_dir.parent / "manual_focus.json")
         )
@@ -137,6 +141,8 @@ class ApplicationOrchestrator:
         self._loop_tick_ms = 0.0
         self._loop_tick_max_ms = 0.0
         self._upload_crop_roi: tuple[int, int, int, int] | None = None
+        # Cropped/resized upload copy, built while the full image is being validated.
+        self._upload_copy_task: asyncio.Future | None = None
         self._background: set[asyncio.Task] = set()
         self._last_scene_empty = False
         self._last_transition_reason = ""
@@ -151,7 +157,7 @@ class ApplicationOrchestrator:
         if config.debug.enabled:
             self._debug_viewer = LiveDebugViewer(config.debug)
             self._debug_viewer.set_capture_handler(self.request_manual_capture)
-            self._debug_viewer.set_focus_handlers(self.focus_status, self.set_manual_focus)
+            self._debug_viewer.set_focus_handlers(self.focus_status, self.set_manual_focus, self.find_manual_focus)
 
     @property
     def has_active_transaction(self) -> bool:
@@ -181,6 +187,7 @@ class ApplicationOrchestrator:
 
     def _install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
+        self._event_loop = loop
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(sig, self._request_shutdown)
@@ -402,7 +409,7 @@ class ApplicationOrchestrator:
         return True
 
     async def _idle_tick(self) -> None:
-        if self.has_active_transaction:
+        if self.has_active_transaction or self._finding_focus:
             return
         if not self.disk.can_capture(self.config.storage.capture_reserve_mb):
             self._update_storage_health(self.disk.check())
@@ -510,6 +517,7 @@ class ApplicationOrchestrator:
         self._txn_detect_latency_ms = self.detector.detection_latency_ms
         self._txn_validated_ms = None
         self._upload_crop_roi = None
+        self._upload_copy_task = None
         set_log_context(capture_id=txn.capture_id)
         logger.info("event=transaction_started capture_id=%s trigger=%s", txn.capture_id, trigger)
         return txn
@@ -535,7 +543,8 @@ class ApplicationOrchestrator:
     def _focus_busy(self) -> bool:
         txn_active = self._transaction is not None and not self._transaction.is_terminal
         return (
-            self.sm.state not in {AppState.IDLE, AppState.WAITING_FOR_REMOVAL}
+            self._finding_focus
+            or self.sm.state not in {AppState.IDLE, AppState.WAITING_FOR_REMOVAL}
             or self.has_active_transaction
             or txn_active
         )
@@ -551,6 +560,61 @@ class ApplicationOrchestrator:
             "saved_lens": self.manual_focus_store.load(),
             "range": [lo, hi],
             "busy": self._focus_busy(),
+        }
+
+    def find_manual_focus(self) -> dict:
+        """Panel button: search the sharpest lens position on the document in view and apply it.
+
+        Not saved: the operator checks the result in the preview and confirms with "Confirm & save".
+        Blocks the calling (HTTP) thread until the search is done.
+        """
+        if not self._manual_focus:
+            return {"ok": False, "status": "disabled", "message": "Manual focus is off (camera.focus_mode is auto)"}
+        loop = self._event_loop
+        if loop is None or not loop.is_running():
+            return {"ok": False, "status": "error", "message": "The service is not running yet"}
+        if self._focus_busy():
+            return {"ok": False, "status": "busy", "message": "A capture is running; try again when it is done"}
+        self._finding_focus = True
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._find_manual_focus(), loop)
+            return future.result(timeout=60.0)
+        except Exception as exc:
+            logger.warning("event=manual_focus_search_failed error=%s", exc)
+            return {"ok": False, "status": "error", "message": "Focus search failed; see the log"}
+        finally:
+            self._finding_focus = False
+
+    async def _find_manual_focus(self) -> dict:
+        previous = self.camera.get_manual_lens()
+        frame = await self._safe_preview()
+        if frame is None:
+            return {"ok": False, "status": "error", "message": "No camera frame"}
+        roi = self.detector.focus_preview_roi(frame)
+        logger.info("event=manual_focus_search_started roi=%s", roi)
+        try:
+            result = await self.autofocus.run_autofocus(
+                self.camera,
+                roi_fraction=self.config.detection.roi_center_fraction,
+                preview_roi=roi,
+                force_auto=True,
+            )
+        except AutofocusError as exc:
+            if previous is not None:
+                self.camera.set_manual_lens(previous)
+            return {"ok": False, "status": "error", "message": f"No sharp position found: {exc}"}
+        lens = valid_lens(result.lens_after)
+        if lens is None:
+            if previous is not None:
+                self.camera.set_manual_lens(previous)
+            return {"ok": False, "status": "error", "message": "The camera did not report a lens position"}
+        lens = self.camera.set_manual_lens(lens)
+        logger.info("event=manual_focus_found lens=%.3f sharpness=%.1f method=%s", lens, result.sharpness, result.method)
+        return {
+            "ok": True,
+            "status": "found",
+            "message": "Best position found; check the preview, then press Confirm & save",
+            "lens_position": lens,
         }
 
     def set_manual_focus(self, lens: object, save: bool = False) -> dict:
@@ -864,6 +928,7 @@ class ApplicationOrchestrator:
             doc_roi = self.detector.document_preview_roi()
             preview_size = self._last_preview_size
             scaler_crop = self.camera.current_scaler_crop()
+            self._start_upload_copy(self._capture_path, doc_roi, preview_size, scaler_crop)
             result = await asyncio.to_thread(
                 self.validator.validate,
                 self._capture_path,
@@ -872,13 +937,6 @@ class ApplicationOrchestrator:
                 scaler_crop=scaler_crop,
                 reference_sharpness=self._transaction.sharpness_score or None,
             )
-            try:
-                self._upload_crop_roi = scale_preview_roi_to_image(
-                    doc_roi, preview_size, (result.width, result.height), scaler_crop=scaler_crop
-                )
-            except Exception:
-                logger.warning("event=upload_crop_roi_failed", exc_info=True)
-                self._upload_crop_roi = None
             self._transaction.mark_validated(
                 size=result.file_bytes,
                 width=result.width,
@@ -902,6 +960,7 @@ class ApplicationOrchestrator:
             self._transition(AppState.UPLOADING)
         except ImageValidationError as exc:
             logger.error("event=image_validation_failed %s", exc)
+            await self._discard_upload_copy()
             self.autofocus.forget_lens("image_invalid")
             self._keep_rejected_for_debug(self._capture_path)
             self.temp_store.cleanup(self._capture_path)
@@ -924,24 +983,47 @@ class ApplicationOrchestrator:
         except OSError:
             logger.warning("event=rejected_image_keep_failed", exc_info=True)
 
-    def _prepare_upload_file(self) -> None:
-        """Replace the full-resolution capture by a cropped, size-limited copy for upload.
+    def _start_upload_copy(self, path: Path, doc_roi, preview_size, scaler_crop) -> None:
+        """Start building the upload copy in a worker thread while the image is validated.
 
-        Falls back to the original on any problem: sending a big image beats losing the document.
+        The crop box only needs the image size, which the JPEG header gives at once, so the two
+        jobs (both read-only on the capture) overlap instead of running one after the other.
         """
-        assert self._capture_path is not None
         cfg = self.config.upload_image
+        self._upload_copy_task = None
+        self._upload_crop_roi = None
+        try:
+            with Image.open(path) as img:
+                size = img.size
+            self._upload_crop_roi = scale_preview_roi_to_image(doc_roi, preview_size, size, scaler_crop=scaler_crop)
+        except Exception:
+            logger.warning("event=upload_crop_roi_failed", exc_info=True)
         if not cfg.crop_to_document and not cfg.max_dimension:
             return
-        original = self._capture_path
+        roi = self._upload_crop_roi
+        self._upload_copy_task = asyncio.ensure_future(asyncio.to_thread(self._make_upload_copy, path, roi))
+
+    async def _discard_upload_copy(self) -> None:
+        task, self._upload_copy_task = self._upload_copy_task, None
+        if task is None:
+            return
+        try:
+            prepared = await task
+        except Exception:
+            return
+        if prepared is not None:
+            self.temp_store.cleanup(prepared.path)
+
+    def _make_upload_copy(self, original: Path, crop_roi):
+        """Cropped, size-limited copy of ``original`` (None on any problem: the original is sent)."""
         dst = self.temp_store.create_temp_path()
         started = time.monotonic()
         try:
-            prepared = prepare_upload_image(original, dst, self._upload_crop_roi, cfg)
+            prepared = prepare_upload_image(original, dst, crop_roi, self.config.upload_image)
         except Exception:
             logger.warning("event=upload_image_prepare_failed using=original", exc_info=True)
             self.temp_store.cleanup(dst)
-            return
+            return None
         logger.info(
             "event=upload_image_prepared source=%dx%d output=%dx%d cropped=%s bytes_before=%d bytes_after=%d "
             "duration_ms=%d",
@@ -954,7 +1036,18 @@ class ApplicationOrchestrator:
             prepared.file_bytes,
             int((time.monotonic() - started) * 1000),
         )
-        self.temp_store.cleanup(original)
+        return prepared
+
+    async def _use_upload_copy(self) -> None:
+        """Send the prepared copy instead of the full-resolution capture (built meanwhile)."""
+        assert self._capture_path is not None
+        task, self._upload_copy_task = self._upload_copy_task, None
+        if task is None:
+            return
+        prepared = await task
+        if prepared is None:
+            return
+        self.temp_store.cleanup(self._capture_path)
         self._capture_path = prepared.path
 
     async def _uploading_tick(self) -> None:
@@ -973,7 +1066,7 @@ class ApplicationOrchestrator:
             self._transaction.image_size,
             (self._transaction.image_sha256 or "")[:16],
         )
-        await asyncio.to_thread(self._prepare_upload_file)
+        await self._use_upload_copy()
         request = UploadRequest(
             capture_id=self._transaction.capture_id,
             device_id=self.config.device_id,

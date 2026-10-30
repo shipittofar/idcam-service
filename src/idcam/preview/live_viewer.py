@@ -339,6 +339,8 @@ _HTML_PAGE = """<!DOCTYPE html>
           <dt>Sharpness now</dt><dd id="focus_sharp">—</dd>
           <dt>Saved value</dt><dd id="focus_saved">not saved yet</dd>
         </dl>
+        <button id="focus_find" type="button">Find best focus</button>
+        <small>Put the document where it will be used first; the search takes a few seconds and does not save.</small>
         <button id="focus_save" type="button">Confirm &amp; save</button>
         <div id="focus_msg" class="manual"></div>
       </section>
@@ -380,6 +382,7 @@ _HTML_PAGE = """<!DOCTYPE html>
       el("focus_sharp").textContent = f.sharpness == null ? "—" : Number(f.sharpness).toFixed(0);
       el("focus_saved").textContent = typeof f.saved_lens === "number" ? Number(f.saved_lens).toFixed(2) : "not saved yet";
       el("focus_save").disabled = !!f.busy;
+      el("focus_find").disabled = !!f.busy;
     }
     async function sendFocus(save) {
       const box = el("focus_msg");
@@ -407,6 +410,32 @@ _HTML_PAGE = """<!DOCTYPE html>
     }
     el("lens_slider").addEventListener("input", (e) => onLensInput(e.target.value));
     el("lens_num").addEventListener("change", (e) => onLensInput(e.target.value));
+    el("focus_find").addEventListener("click", async () => {
+      const box = el("focus_msg");
+      const btn = el("focus_find");
+      btn.disabled = true;
+      box.className = "manual";
+      box.textContent = "Searching for the sharpest position...";
+      try {
+        const r = await fetch("/preview/focus", {
+          method: "POST", cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auto: true })
+        });
+        const d = await r.json();
+        box.className = "manual" + (d.ok ? " ok" : " error");
+        box.textContent = d.message || (d.ok ? "Done" : "Failed");
+        if (d.ok && typeof d.lens_position === "number") {
+          lensTouched = false;
+          el("lens_slider").value = d.lens_position;
+          el("lens_num").value = Number(d.lens_position).toFixed(2);
+        }
+      } catch (err) {
+        box.className = "manual error";
+        box.textContent = "Request failed";
+      }
+      btn.disabled = false;
+    });
     el("focus_save").addEventListener("click", async () => {
       const v = Number(el("lens_num").value).toFixed(2);
       if (!confirm("Save lens position " + v + " as the manual focus for all later captures?")) return;
@@ -528,12 +557,13 @@ def _make_handler(viewer: LiveDebugViewer) -> type[BaseHTTPRequestHandler]:
             except ValueError:
                 self._json_bytes({"ok": False, "status": "invalid", "message": "Invalid JSON body"}, 400)
                 return
-            handler = viewer.focus_set_handler
+            auto = bool(body.get("auto", False))
+            handler = viewer.focus_auto_handler if auto else viewer.focus_set_handler
             if handler is None:
                 self._json_bytes({"ok": False, "status": "unavailable", "message": "Manual focus is not attached"}, 503)
                 return
             try:
-                result = handler(body.get("lens_position"), bool(body.get("save", False)))
+                result = handler() if auto else handler(body.get("lens_position"), bool(body.get("save", False)))
             except Exception:
                 logger.exception("event=debug_manual_focus_failed")
                 self._json_bytes({"ok": False, "status": "error", "message": "Focus request failed"}, 500)
@@ -546,7 +576,7 @@ def _make_handler(viewer: LiveDebugViewer) -> type[BaseHTTPRequestHandler]:
             for key in ("lens_position", "saved_lens"):
                 if isinstance(result.get(key), (int, float)):
                     safe[key] = float(result[key])
-            code = {"ok": 200, "applied": 200, "saved": 200, "invalid": 400, "busy": 409, "disabled": 409}.get(
+            code = {"ok": 200, "applied": 200, "saved": 200, "found": 200, "invalid": 400, "busy": 409, "disabled": 409}.get(
                 safe["status"], 200 if safe["ok"] else 500
             )
             self._json_bytes(safe, code)
@@ -674,6 +704,7 @@ class LiveDebugViewer:
         self._capture_handler: Any = None
         self._focus_status_fn: Any = None
         self._focus_set_fn: Any = None
+        self._focus_auto_fn: Any = None
 
     @property
     def is_running(self) -> bool:
@@ -686,10 +717,16 @@ class LiveDebugViewer:
     def set_capture_handler(self, handler: Any) -> None:
         self._capture_handler = handler
 
-    def set_focus_handlers(self, status_fn: Any, set_fn: Any) -> None:
-        """Manual focus panel: ``status_fn() -> dict`` and ``set_fn(lens, save) -> dict``."""
+    def set_focus_handlers(self, status_fn: Any, set_fn: Any, auto_fn: Any = None) -> None:
+        """Manual focus panel: ``status_fn() -> dict``, ``set_fn(lens, save) -> dict`` and the
+        optional ``auto_fn() -> dict`` behind the "Find best focus" button."""
         self._focus_status_fn = status_fn
         self._focus_set_fn = set_fn
+        self._focus_auto_fn = auto_fn
+
+    @property
+    def focus_auto_handler(self) -> Any:
+        return self._focus_auto_fn
 
     @property
     def focus_set_handler(self) -> Any:
