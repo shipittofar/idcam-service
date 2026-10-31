@@ -309,3 +309,74 @@ class TestSwapRobustness:
         for _ in range(20):
             await orch._removal_tick()
         assert orch.sm.state == AppState.WAITING_FOR_REMOVAL
+
+
+class TestRemovalUsesTheLearnedBackground:
+    """The empty desk can score 0.5 on its own (clutter, a mat); then 'confidence < threshold' never says empty."""
+
+    @staticmethod
+    def _cfg_bg(**kw):
+        return DetectionConfig(
+            min_geometry_confidence=0.25, background_check=True, background_warmup_frames=4,
+            stable_frames_required=2, removal_frames_required=2, **kw,
+        )
+
+    def _learned(self):
+        det = DocumentDetector(self._cfg_bg())
+        furniture = _doc()  # a rectangle that is always there and scores high on its own
+        for _ in range(12):
+            det.detect(furniture.copy())
+        assert det._bg_thumb is not None
+        return det, furniture
+
+    def test_a_confident_outline_that_is_only_the_background_counts_as_empty(self):
+        det, furniture = self._learned()
+        assert det._find_geometry(furniture.copy()).confidence > 0.5  # without the background it is a "document"
+        assert det.is_scene_empty(furniture.copy()) is True
+
+    def test_the_same_picture_with_a_new_document_is_not_empty(self):
+        det, furniture = self._learned()
+        bigger = _doc(margin_x=40, margin_y=30, paper=130)
+        assert det.is_scene_empty(bigger.copy()) is False
+
+    def test_a_global_exposure_shift_does_not_hide_the_removal(self):
+        det, furniture = self._learned()
+        brighter = np.clip(furniture.astype(np.int16) + 20, 0, 255).astype(np.uint8)
+        assert det.is_scene_empty(brighter) is True
+
+    def test_without_the_background_check_the_old_rule_applies(self):
+        det = DocumentDetector(DetectionConfig(min_geometry_confidence=0.25, background_check=False))
+        assert det.is_scene_empty(_doc()) is False  # a confident outline is a document
+
+    def test_the_gap_is_reported_for_the_log(self):
+        det, furniture = self._learned()
+        assert det.background_gap(furniture.copy()) < 2.0
+        assert det.background_gap(_doc(margin_x=40, margin_y=30, paper=130)) > 5.0
+        assert DocumentDetector(DetectionConfig()).background_gap(furniture) is None
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_removal_ends_when_the_scene_is_back_to_the_learned_desk(self, tmp_path):
+        config = AppConfig(
+            device_id="rm-bg",
+            temp_dir=tmp_path / "state" / "tmp",
+            server=ServerConfig(url="https://api.example.com"),
+            camera=CameraConfig(),
+            detection=self._cfg_bg(),
+            ui=UIConfig(status_file=tmp_path / "run" / "status.json", admin_socket=tmp_path / "run" / "admin.sock"),
+        )
+        orch = ApplicationOrchestrator(config, use_mock_camera=True)
+        orch.health.camera = ComponentStatus(level=HealthLevel.HEALTHY, details={"healthy": True})
+        furniture = _doc()
+        for _ in range(12):
+            orch.detector.detect(furniture.copy())
+        orch._doc_signature = None
+        orch.sm.state = AppState.WAITING_FOR_REMOVAL
+        txn = ActiveCaptureTransaction(capture_id="cap-bg")
+        txn.mark_completed()
+        orch._transaction = txn
+        orch._safe_preview = AsyncMock(return_value=furniture.copy())
+        for _ in range(6):
+            await orch._removal_tick()
+            if orch.sm.state != AppState.WAITING_FOR_REMOVAL:
+                break
+        assert orch.sm.state == AppState.IDLE

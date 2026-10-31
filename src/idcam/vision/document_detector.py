@@ -357,6 +357,17 @@ class DocumentDetector:
             return None
         return tuple(geom.corners)
 
+    def background_gap(self, frame: np.ndarray) -> float | None:
+        """Mean colour difference of the picture to the learned empty scene (None while not learned); for logs."""
+        if self._bg_thumb is None:
+            return None
+        thumb = self._bg_thumbnail(frame)
+        if self._bg_thumb.shape != thumb.shape:
+            return None
+        diff = thumb - self._bg_thumb
+        offset = np.median(diff.reshape(-1, diff.shape[-1]), axis=0)
+        return float(np.abs(diff - offset).mean())
+
     @property
     def calm_streak(self) -> int:
         """Consecutive frames that looked like the previous analysed one (0 = the picture just changed)."""
@@ -664,7 +675,25 @@ class DocumentDetector:
         A small margin under the detection threshold keeps a present page from flickering to empty.
         """
         geom = self._find_geometry(frame)
-        return geom is None or geom.confidence < self._present_threshold(geom, self.config.scene_empty_factor)
+        if geom is None or geom.confidence < self._present_threshold(geom, self.config.scene_empty_factor):
+            return True
+        if self.config.background_check and self._bg_thumb is not None:
+            # A confident outline is still "empty" when it is the learned empty background (furniture, a mat
+            # that scores 0.5 on its own) or when the whole picture is back to what the empty desk looked like.
+            thumb = self._bg_thumbnail(frame)
+            h, w = frame.shape[:2]
+            if self._is_background(thumb, tuple(geom.bbox), (w, h)) or self._looks_like_background(thumb):
+                return True
+        return False
+
+    def _looks_like_background(self, thumb: np.ndarray) -> bool:
+        """The whole picture matches the learned empty scene (after removing a global exposure shift)."""
+        base = self._bg_thumb
+        if base is None or base.shape != thumb.shape:
+            return False
+        diff = thumb - base
+        offset = np.median(diff.reshape(-1, diff.shape[-1]), axis=0)
+        return float(np.abs(diff - offset).mean()) < 0.5 * self.config.background_min_diff
 
     def rebaseline_motion(self, frame: np.ndarray) -> None:
         """Re-measure the locked outline on a frame taken after focusing.

@@ -1223,11 +1223,12 @@ class ApplicationOrchestrator:
         self._removal_ticks += 1
         if self._removal_ticks % 25 == 1:
             logger.info(
-                "event=waiting_for_removal_progress empty=%s count=%d/%d confidence=%.2f",
+                "event=waiting_for_removal_progress empty=%s count=%d/%d confidence=%.2f background_gap=%s",
                 empty,
                 self._removal_count,
                 self.config.detection.removal_frames_required,
                 self.detector.debug_info().geometry_confidence,
+                None if (gap := self.detector.background_gap(frame)) is None else round(gap, 1),
             )
         self._publish_debug(frame)
 
