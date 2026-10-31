@@ -85,7 +85,7 @@ detection:
   # hand_confidence_relax: 0.05            # less confidence needed when found with the hand's pixels cut out
   # hand_corner_motion_px: 10.0            # a held page is still when its corners move less than this per frame
   # background_min_diff: 10.0
-  stability_sensitivity: 0.4     # 1.0 = original motion tolerance; 0.4 = 60% less sensitive (threshold 8/0.4 = 20)
+  stability_sensitivity: 0.36    # 1.0 = original motion tolerance; 0.36 = 64% less sensitive (threshold 8/0.36 = 22)
   removal_frames_required: 10
   removal_motion_factor: 0.5
   removal_edge_factor: 0.5

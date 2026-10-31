@@ -32,6 +32,17 @@ class DocumentGeometry:
     detection_method: str = "unknown"
     contrast_score: float = 0.0
     skin_fraction: float = 0.0  # share of the box that is skin-coloured (a hand holding the page)
+    quad_fill: float = 1.0  # outline area / area of the fitted quadrilateral (a page fills it, a hand blob does not)
+
+    @property
+    def swallows_hand(self) -> bool:
+        """The box holds a good deal of skin AND is not a clean rectangle: the page together with its hand.
+
+        A mostly skin-coloured box that is a clean rectangle is a skin-coloured page, not a hand.
+        """
+        if self.skin_fraction <= _SKIN_PENALTY_FROM:
+            return False
+        return self.skin_fraction < _SKIN_DOCUMENT_ABOVE or self.quad_fill < _SKIN_CLEAN_FILL
 
     @property
     def rank(self) -> float:
@@ -40,8 +51,8 @@ class DocumentGeometry:
         Its own ``confidence`` (what the detection threshold sees) is untouched: a page that is only
         found together with the hand must still be found.
         """
-        if _SKIN_PENALTY_FROM < self.skin_fraction < _SKIN_DOCUMENT_ABOVE:
-            return self.confidence * max(0.35, 1.0 - 1.6 * (self.skin_fraction - _SKIN_PENALTY_FROM))
+        if self.swallows_hand:
+            return self.confidence * max(0.35, 1.0 - 1.6 * (min(self.skin_fraction, 0.6) - _SKIN_PENALTY_FROM))
         return self.confidence
 
 
@@ -451,6 +462,8 @@ def _score_geometry(
     # How much of the box is skin: a candidate that covers a hand as well is the document AND the fingers
     # holding it, so its box is wrong and a candidate without the hand should win (see ``rank``). A box
     # that is mostly skin-coloured is a skin-coloured document and is left alone.
+    quad_area = float(cv2.contourArea(np.array(corners, np.float32)))
+    quad_fill = min(1.2, contour_area / quad_area) if quad_area > 1.0 else 1.0
     skin_fraction = 0.0
     if skin is not None:
         sx, sy, sw_, sh_ = clip_roi(bbox, skin.shape)
@@ -495,6 +508,7 @@ def _score_geometry(
         detection_method=method,
         contrast_score=float(contrast),
         skin_fraction=skin_fraction,
+        quad_fill=quad_fill,
     )
     diag = GeometryCandidateDiag(
         True,
@@ -586,21 +600,31 @@ def _collect_from_mask(
 
 # Skin: a page held in a hand. Pixels of the hand are cut out of the masks (extra variants), and a
 # candidate that swallowed a hand is demoted. Fractions are of the candidate's box.
-_SKIN_LO = (70, 135, 85)  # YCrCb; the luma floor keeps dark reds (burgundy covers) out
-_SKIN_HI = (255, 180, 135)
+_SKIN_LO = (70, 133, 77)  # YCrCb; the luma floor keeps dark reds (burgundy covers) out
+_SKIN_HI = (255, 185, 140)
+# HSV (OpenCV: H 0..180): warm hues with some saturation, for light that shifts the chroma (tungsten, AWB)
+_SKIN_HSV_LO = (0, 45, 90)
+_SKIN_HSV_HI = (22, 190, 255)
 _SKIN_FRAME_MIN = 0.004  # less skin in the frame than this: no hand
 _SKIN_FRAME_MAX = 0.35  # more: the desk itself is skin-coloured (wood), the cue is useless
 _SKIN_PENALTY_FROM = 0.06
 _SKIN_DOCUMENT_ABOVE = 0.6
+_SKIN_CLEAN_FILL = 0.88  # a skin-coloured box that fills its quadrilateral this well is a page, not a hand
 _SKIN_BASE_VARIANTS = ("bg_otsu", "bg_otsu_inv", "lab_bg_otsu", "otsu", "otsu_inv")
+
+
+def skin_pixels(rgb: np.ndarray) -> np.ndarray:
+    """Raw mask (255 = skin-coloured) of an RGB image: YCrCb range OR warm-hue HSV range."""
+    ycc = cv2.inRange(cv2.cvtColor(rgb, cv2.COLOR_RGB2YCrCb), _SKIN_LO, _SKIN_HI)
+    hsv = cv2.inRange(cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV), _SKIN_HSV_LO, _SKIN_HSV_HI)
+    return cv2.bitwise_or(ycc, hsv)
 
 
 def _skin_mask(work: np.ndarray) -> np.ndarray | None:
     """Mask of skin-coloured pixels (dilated a little), or None when there is no hand-sized amount of it."""
     if work.ndim != 3 or work.shape[2] != 3:
         return None
-    ycc = cv2.cvtColor(work, cv2.COLOR_RGB2YCrCb)
-    mask = cv2.inRange(ycc, _SKIN_LO, _SKIN_HI)
+    mask = skin_pixels(work)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     fraction = float(np.count_nonzero(mask)) / mask.size
     if not _SKIN_FRAME_MIN < fraction < _SKIN_FRAME_MAX:
@@ -644,6 +668,7 @@ def _rescale_geometry(geom: DocumentGeometry, factor: float, frame_shape: tuple[
         detection_method=geom.detection_method,
         contrast_score=geom.contrast_score,
         skin_fraction=geom.skin_fraction,
+        quad_fill=geom.quad_fill,
     )
 
 

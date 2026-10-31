@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from idcam.config.schema import DetectionConfig
-from idcam.vision.document_geometry import corner_motion
+from idcam.vision.document_geometry import corner_motion, skin_pixels
 from idcam.vision.motion import normalize_gray, structural_motion, to_gray
 from idcam.vision.sharpness import clip_roi
 
@@ -20,10 +20,6 @@ class StabilityDebug:
     stable_count: int
     stable_frames_required: int
     stable: bool
-
-
-_SKIN_LO = (70, 135, 85)  # YCrCb, same range as the geometry detector's skin mask
-_SKIN_HI = (255, 180, 135)
 
 
 class StabilityDetector:
@@ -59,7 +55,7 @@ class StabilityDetector:
         if region.size == 0:
             return False
         small = cv2.resize(region, (96, max(8, int(96 * region.shape[0] / max(region.shape[1], 1)))), interpolation=cv2.INTER_AREA)
-        mask = cv2.inRange(cv2.cvtColor(small, cv2.COLOR_RGB2YCrCb), _SKIN_LO, _SKIN_HI)
+        mask = skin_pixels(small)
         return float(np.count_nonzero(mask)) / mask.size > 0.03
 
     def set_roi(self, roi: tuple[int, int, int, int]) -> None:

@@ -152,7 +152,7 @@ class DetectionConfig(BaseModel):
     stable_frames_required: int = Field(5, ge=2, le=60)
     # 1.0 = the original motion tolerance; 0.6 = 40 % less sensitive to movement of the page
     # (the motion thresholds of the stability wait and of the pre-capture check are divided by it).
-    stability_sensitivity: float = Field(0.4, gt=0.1, le=1.0)
+    stability_sensitivity: float = Field(0.36, gt=0.1, le=1.0)
     removal_frames_required: int = Field(10, ge=2, le=120)
     # A document counts as present only after this many consecutive frames with an outline at or above
     # min_geometry_confidence. Raise both to react to fewer non-documents (hand, shadow, desk edge).
@@ -199,6 +199,9 @@ class DetectionConfig(BaseModel):
     # the page its stability is judged by how far the page's corners move between frames (pixels): the
     # picture-difference measure used for a page on the desk cannot tell a 3 px tremor from a real move.
     hand_confidence_relax: float = Field(0.05, ge=0.0, le=0.3)
+    # A winning outline that includes a hand is believed only after this many times the usual frames
+    # (the outline without the hand normally takes its place meanwhile). 1 = no extra patience.
+    hand_detect_patience: int = Field(4, ge=1, le=20)
     hand_corner_motion_px: float = Field(10.0, gt=0.0, le=100.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)
 

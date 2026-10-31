@@ -180,3 +180,59 @@ class TestTopAndBottomEdges:
         img, _ = _card("dark", NAVY, None, cx=960, cy=40, width=w, angle=0.0)  # a third of it is outside
         geom = _detect(img, touch_penalty_vertical=DetectionConfig().geometry_touch_penalty_vertical)
         assert geom is None or geom.confidence < DetectionConfig().min_geometry_confidence
+
+
+class TestSwallowedHandNeedsPatience:
+    def test_a_winner_that_includes_the_hand_needs_more_frames_than_a_clean_one(self):
+        from types import SimpleNamespace
+
+        det = DocumentDetector(DetectionConfig(detect_frames_required=3, hand_detect_patience=4))
+
+        def feed(swallows):
+            geom = SimpleNamespace(
+                confidence=0.7, bbox=(100, 100, 400, 300), corners=((0, 0),) * 4, edge_strength=0.0,
+                area_fraction=0.1, swallows_hand=swallows, detection_method="otsu",
+            )
+            det._find_geometry = lambda frame: geom  # type: ignore[method-assign]
+            return det.detect(np.zeros((120, 160, 3), np.uint8))
+
+        assert [feed(True) for _ in range(11)][-1] is False  # 3 x 4 = 12 frames needed
+        assert feed(True) is True
+        det2 = DocumentDetector(DetectionConfig(detect_frames_required=3, hand_detect_patience=4))
+        det = det2
+        assert [feed(False) for _ in range(3)][-1] is True
+
+    def test_the_reason_is_visible_while_waiting(self):
+        from types import SimpleNamespace
+
+        det = DocumentDetector(DetectionConfig(detect_frames_required=3, hand_detect_patience=4))
+        geom = SimpleNamespace(
+            confidence=0.7, bbox=(100, 100, 400, 300), corners=((0, 0),) * 4, edge_strength=0.0,
+            area_fraction=0.1, swallows_hand=True, detection_method="otsu",
+        )
+        det._find_geometry = lambda frame: geom  # type: ignore[method-assign]
+        det.detect(np.zeros((120, 160, 3), np.uint8))
+        assert det._last_reject_reason == "waiting_for_hand_free_outline"
+
+
+class TestHandShape:
+    def _g(self, skin, fill, conf=0.7):
+        return dg.DocumentGeometry(
+            corners=((0, 0), (10, 0), (10, 10), (0, 10)), bbox=(0, 0, 10, 10), center=(5, 5), width=10, height=10,
+            rotation_deg=0.0, aspect_ratio=1.0, area_fraction=0.1, confidence=conf, edge_strength=1.0,
+            rectangularity=1.0, skin_fraction=skin, quad_fill=fill,
+        )
+
+    def test_a_mostly_skin_coloured_box_that_is_not_a_clean_rectangle_is_a_hand(self):
+        assert self._g(skin=0.8, fill=0.7).swallows_hand  # a big hand and arm around a small card
+        assert self._g(skin=0.3, fill=0.95).swallows_hand
+        assert not self._g(skin=0.8, fill=0.95).swallows_hand  # a skin-coloured page
+        assert not self._g(skin=0.02, fill=0.7).swallows_hand
+
+    def test_the_hsv_branch_catches_skin_that_the_chroma_range_misses(self):
+        warm = np.zeros((20, 20, 3), np.uint8)
+        warm[:] = (200, 120, 70)  # a tanned, warm-lit hand: orange hue
+        assert np.count_nonzero(dg.skin_pixels(warm)) > 0
+        blue = np.zeros((20, 20, 3), np.uint8)
+        blue[:] = (30, 60, 140)
+        assert np.count_nonzero(dg.skin_pixels(blue)) == 0

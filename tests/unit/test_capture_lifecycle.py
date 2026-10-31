@@ -607,4 +607,4 @@ class TestFocusMemoryWiring:
     def test_pre_capture_motion_check_uses_the_relaxed_stability_threshold(self, app_config):
         orch = _orch(app_config)
         base = app_config.detection.motion_threshold
-        assert orch.stability.effective_motion_threshold == pytest.approx(base / 0.4)
+        assert orch.stability.effective_motion_threshold == pytest.approx(base / 0.36)

@@ -645,7 +645,13 @@ class DocumentDetector:
                 self._first_seen_at = time.monotonic()
             self._absent_frames = 0
             self._last_reject_reason = ""
-            if not self._detected_latched and self._present_frames >= self.config.detect_frames_required:
+            # The page together with the hand holding it is a wrong outline; the hand-free candidate usually
+            # appears once the hand settles, so a winner that swallowed a hand has to persist longer first.
+            required = self.config.detect_frames_required
+            if getattr(geom, "swallows_hand", False):
+                required *= self.config.hand_detect_patience
+                self._last_reject_reason = "waiting_for_hand_free_outline" if self._present_frames < required else ""
+            if not self._detected_latched and self._present_frames >= required:
                 self._detected_latched = True
         else:
             self._present_frames = 0
