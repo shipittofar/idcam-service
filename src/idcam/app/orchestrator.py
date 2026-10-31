@@ -544,6 +544,13 @@ class ApplicationOrchestrator:
                     info.gray_std,
                     info.document_roi,
                 )
+                if self._ascii_debug:
+                    try:
+                        geom = self.detector._last_geometry
+                        gray_map, cr_map = ascii_snapshot(frame, getattr(geom, "corners", None))
+                        logger.info("event=ascii_snapshot kind=no_document cols=64 gray=%s cr=%s", gray_map, cr_map)
+                    except Exception:
+                        logger.warning("event=ascii_snapshot_failed", exc_info=True)
 
     def _begin_transaction(self, *, trigger: str = "auto") -> ActiveCaptureTransaction:
         if self._transaction is not None and not self._transaction.is_terminal:

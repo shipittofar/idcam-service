@@ -199,6 +199,12 @@ class DetectionConfig(BaseModel):
     # the page its stability is judged by how far the page's corners move between frames (pixels): the
     # picture-difference measure used for a page on the desk cannot tell a 3 px tremor from a real move.
     hand_confidence_relax: float = Field(0.05, ge=0.0, le=0.3)
+    # Near the edges and corners of the view the lens is softer, darker and the page is partly shaded, so a
+    # real page scores lower there. A CLEAN rectangle (rectangularity and quad fill high) whose box lies within
+    # edge_zone_fraction of a border (but does not touch it: that is the cut-off penalty's business) needs
+    # edge_zone_relax less confidence. 0 switches it off.
+    edge_zone_fraction: float = Field(0.18, ge=0.0, le=0.5)
+    edge_zone_relax: float = Field(0.08, ge=0.0, le=0.3)
     # A winning outline that includes a hand is believed only after this many times the usual frames
     # (the outline without the hand normally takes its place meanwhile). 1 = no extra patience.
     hand_detect_patience: int = Field(4, ge=1, le=20)

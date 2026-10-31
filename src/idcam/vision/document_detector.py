@@ -374,11 +374,27 @@ class DocumentDetector:
         patch = self._signature_patch(frame, bbox)  # type: ignore[arg-type]
         return None if patch is None else DocumentSignature(tuple(int(v) for v in bbox), patch)  # type: ignore[arg-type]
 
+    def _in_edge_zone(self, geom: Any) -> bool:
+        """A clean rectangle near (not touching) a border of the view: see DetectionConfig.edge_zone_*."""
+        cfg = self.config
+        if cfg.edge_zone_relax <= 0.0 or cfg.edge_zone_fraction <= 0.0 or geom is None:
+            return False
+        w, h = self._last_frame_size
+        if w <= 0 or h <= 0:
+            return False
+        if getattr(geom, "rectangularity", 0.0) < 0.88 or getattr(geom, "quad_fill", 1.0) < 0.9:
+            return False  # a ragged outline near the edge is more likely a shadow or the desk's rim
+        x, y, bw, bh = geom.bbox
+        margin = min(x, y, w - (x + bw), h - (y + bh))
+        return 0.003 * max(w, h) < margin <= cfg.edge_zone_fraction * min(w, h)
+
     def _present_threshold(self, geom: Any, factor: float = 1.0) -> float:
-        """Confidence a candidate needs; less when it was found with a hand's pixels cut out."""
+        """Confidence a candidate needs; less with a hand's pixels cut out, and less in the edge zone."""
         threshold = self.config.min_geometry_confidence * factor
         if geom is not None and str(getattr(geom, "detection_method", "")).endswith("_noskin"):
             threshold -= self.config.hand_confidence_relax
+        if self._in_edge_zone(geom):
+            threshold -= self.config.edge_zone_relax
         return threshold
 
     def current_corners(self, frame: np.ndarray) -> tuple[tuple[int, int], ...] | None:

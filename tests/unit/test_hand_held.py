@@ -395,3 +395,59 @@ def test_the_running_build_can_be_logged():
 
     commit = _git_commit()
     assert isinstance(commit, str) and commit
+
+
+class TestEdgeZone:
+    """Pages near (not touching) a border need a little less confidence; messy or cut-off ones do not."""
+
+    @staticmethod
+    def _det(**kw):
+        det = DocumentDetector(DetectionConfig(min_geometry_confidence=0.5, edge_zone_fraction=0.18, edge_zone_relax=0.08, **kw))
+        det._last_frame_size = (1920, 1080)
+        return det
+
+    @staticmethod
+    def _g(bbox, rect=1.0, fill=1.0, method="otsu"):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(bbox=bbox, rectangularity=rect, quad_fill=fill, detection_method=method, confidence=0.45)
+
+    def test_a_clean_page_near_the_left_edge_gets_the_relaxed_threshold(self):
+        det = self._det()
+        assert det._present_threshold(self._g((120, 400, 600, 380))) == pytest.approx(0.42)
+        assert det._present_threshold(self._g((600, 400, 600, 380))) == pytest.approx(0.5)  # the middle: unchanged
+
+    def test_a_page_near_the_bottom_or_a_corner_is_covered_too(self):
+        det = self._det()
+        assert det._present_threshold(self._g((600, 600, 600, 440))) == pytest.approx(0.42)  # 40 px from the bottom
+        assert det._present_threshold(self._g((60, 50, 500, 320))) == pytest.approx(0.42)  # a corner
+
+    def test_a_page_touching_the_border_is_not_relaxed(self):
+        det = self._det()
+        assert det._present_threshold(self._g((0, 400, 600, 380))) == pytest.approx(0.5)
+        assert det._present_threshold(self._g((600, 700, 600, 380))) == pytest.approx(0.5)  # bottom edge at 1080
+
+    def test_a_ragged_outline_near_the_edge_is_not_relaxed(self):
+        det = self._det()
+        assert det._present_threshold(self._g((120, 400, 600, 380), rect=0.7)) == pytest.approx(0.5)
+        assert det._present_threshold(self._g((120, 400, 600, 380), fill=0.8)) == pytest.approx(0.5)
+
+    def test_it_stacks_with_the_hand_relaxation_and_can_be_switched_off(self):
+        det = self._det()
+        assert det._present_threshold(self._g((120, 400, 600, 380), method="bg_otsu_noskin")) == pytest.approx(0.37)
+        off = DocumentDetector(DetectionConfig(min_geometry_confidence=0.5, edge_zone_relax=0.0))
+        off._last_frame_size = (1920, 1080)
+        assert off._present_threshold(self._g((120, 400, 600, 380))) == pytest.approx(0.5)
+
+    def test_a_page_near_the_edge_that_scores_below_the_normal_threshold_is_detected(self):
+        det = DocumentDetector(DetectionConfig(min_geometry_confidence=0.5, edge_zone_relax=0.08, detect_frames_required=3))
+        from types import SimpleNamespace
+
+        geom = SimpleNamespace(
+            confidence=0.45, bbox=(120, 400, 600, 380), corners=((0, 0),) * 4, edge_strength=0.0, area_fraction=0.1,
+            rectangularity=1.0, quad_fill=1.0, detection_method="otsu", swallows_hand=False,
+        )
+        det._find_geometry = lambda frame: geom  # type: ignore[method-assign]
+        det._last_frame_size = (1920, 1080)
+        results = [det.detect(np.zeros((120, 160, 3), np.uint8)) for _ in range(3)]
+        assert results[-1] is True
