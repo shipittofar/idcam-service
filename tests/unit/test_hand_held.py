@@ -451,3 +451,19 @@ class TestEdgeZone:
         det._last_frame_size = (1920, 1080)
         results = [det.detect(np.zeros((120, 160, 3), np.uint8)) for _ in range(3)]
         assert results[-1] is True
+
+
+class TestSkinByHue:
+    @staticmethod
+    def _is_skin(rgb):
+        px = np.zeros((4, 4, 3), np.uint8)
+        px[:] = rgb
+        return bool(np.count_nonzero(dg.skin_pixels(px)))
+
+    @pytest.mark.parametrize("rgb", [(85, 55, 45), (100, 45, 30), (140, 70, 50), (180, 90, 60), (224, 172, 140), (110, 75, 60)])
+    def test_orange_tones_are_skin_even_when_the_light_makes_them_saturated(self, rgb):
+        assert self._is_skin(rgb)
+
+    @pytest.mark.parametrize("rgb", [(120, 30, 50), (72, 18, 30), (30, 60, 140), (130, 130, 130), (40, 120, 70), (235, 235, 232), (45, 48, 50)])
+    def test_dark_red_covers_and_neutral_or_cold_colours_are_not(self, rgb):
+        assert not self._is_skin(rgb)

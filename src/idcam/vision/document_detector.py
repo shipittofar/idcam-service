@@ -169,6 +169,7 @@ class DocumentDetector:
         # Empty-scene background (see DetectionConfig.background_check)
         self._bg_thumb: np.ndarray | None = None
         self._bg_work: np.ndarray | None = None
+        self.last_new_share = 0.0  # share of the frame that differs from the learned empty desk (for the log)
         self._bg_stale = 0
         self._calm_streak = 0  # consecutive frames that look like the previous analysed one
         self._bg_frames_seen = 0
@@ -440,6 +441,10 @@ class DocumentDetector:
         diff = thumb - self._bg_thumb
         offset = np.median(diff.reshape(-1, diff.shape[-1]), axis=0)
         return float(np.abs(diff - offset).mean())
+
+    @property
+    def background_ready(self) -> bool:
+        return self._bg_work is not None
 
     @property
     def calm_streak(self) -> int:
@@ -824,7 +829,8 @@ class DocumentDetector:
         offset = np.median(diff.reshape(-1, diff.shape[-1]), axis=0)  # global exposure / white balance shift
         new = (np.abs(diff - offset).max(axis=2) > _BG_DIFF_THRESHOLD).astype(np.uint8) * 255
         new = cv2.morphologyEx(new, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        if np.count_nonzero(new) < _BG_DIFF_MIN_FRACTION * new.size:
+        self.last_new_share = float(np.count_nonzero(new)) / new.size
+        if self.last_new_share < _BG_DIFF_MIN_FRACTION:
             return None
         return cv2.morphologyEx(new, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
 

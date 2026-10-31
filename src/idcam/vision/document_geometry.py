@@ -631,7 +631,10 @@ def _collect_from_mask(
 # (burgundy: HSV saturation ~190-200 of 255) are told apart from dark skin (~110-130) by saturation.
 _SKIN_LO = (22, 133, 77)
 _SKIN_HI = (255, 185, 140)
-_SKIN_MAX_SATURATION = 165  # HSV S (0..255): more saturated than any skin
+# Skin is orange: HSV hue (OpenCV 0..180) up to ~25 and some colour. A dark red cover (burgundy) has hue ~172,
+# which a saturation cap could not separate from a hand lit by warm light (both ~190-200 of 255).
+_SKIN_HUE_MAX = 25
+_SKIN_MIN_SATURATION = 30
 # HSV (OpenCV: H 0..180): warm hues with some saturation, for light that shifts the chroma (tungsten, AWB)
 _SKIN_HSV_LO = (0, 45, 40)
 _SKIN_HSV_HI = (22, 190, 255)
@@ -650,8 +653,8 @@ def skin_pixels(rgb: np.ndarray) -> np.ndarray:
     ycc = cv2.inRange(cv2.cvtColor(rgb, cv2.COLOR_RGB2YCrCb), _SKIN_LO, _SKIN_HI)
     hsv_img = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     warm = cv2.inRange(hsv_img, _SKIN_HSV_LO, _SKIN_HSV_HI)
-    not_too_saturated = cv2.inRange(hsv_img, (0, 0, 0), (180, _SKIN_MAX_SATURATION, 255))
-    return cv2.bitwise_and(cv2.bitwise_or(ycc, warm), not_too_saturated)
+    orange = cv2.inRange(hsv_img, (0, _SKIN_MIN_SATURATION, 0), (_SKIN_HUE_MAX, 255, 255))
+    return cv2.bitwise_and(cv2.bitwise_or(ycc, warm), orange)
 
 
 def _skin_mask(work: np.ndarray, change: np.ndarray | None = None) -> tuple[np.ndarray | None, float, float]:

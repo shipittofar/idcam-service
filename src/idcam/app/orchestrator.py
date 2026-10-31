@@ -499,7 +499,7 @@ class ApplicationOrchestrator:
         if detected:
             logger.info(
                 "event=document_detected confidence=%.2f area=%.3f roi=%s method=%s skin=%.2f fill=%.2f "
-                "frame_skin=%.3f skin_raw=%.3f led=%s motion=%.2f edge_density=%.4f latency_ms=%d alts=%s",
+                "frame_skin=%.3f skin_raw=%.3f bg=%s new=%.3f led=%s motion=%.2f edge_density=%.4f latency_ms=%d alts=%s",
                 self.detector.debug_info().geometry_confidence,
                 getattr(self.detector._last_geometry, "area_fraction", 0.0),
                 self.detector.debug_info().document_roi,
@@ -508,6 +508,8 @@ class ApplicationOrchestrator:
                 getattr(self.detector._last_geometry, "quad_fill", 1.0),
                 getattr(self.detector._last_geometry, "frame_skin", 0.0),
                 getattr(self.detector._last_geometry, "skin_raw", 0.0),
+                "learned" if self.detector.background_ready else "none",
+                self.detector.last_new_share,
                 "on" if self.led.config.enabled else "off",
                 self.detector.last_motion,
                 self.detector.last_edge_density,
