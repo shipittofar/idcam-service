@@ -227,3 +227,85 @@ class TestStabilityFollowsTheSwap:
         assert orch.sm.state in {AppState.FOCUSING, AppState.CAPTURING}
         x, y, w, h = orch.detector.lock.roi
         assert abs(x - 220) < 40 and abs(y - 160) < 40
+
+
+def _same_template_other_fields(a):
+    """The same card layout with three fields that differ (NCC with the original ~0.87)."""
+    b = a.copy()
+    for y, x in ((150, 150), (250, 300), (320, 200)):
+        b[y : y + 30, x : x + 60] = 210
+    return b
+
+
+class TestSwapRobustness:
+    def test_a_candidate_below_the_detection_threshold_can_never_replace_a_document(self):
+        det = DocumentDetector(DetectionConfig(min_geometry_confidence=0.99))  # nothing in view reaches it
+        sig = det.document_signature(_doc())
+        assert sig is not None
+        assert not any(det.document_replaced(_doc(margin_x=200, margin_y=150).copy(), sig) for _ in range(12))
+
+    def test_two_cards_of_the_same_template_are_told_apart_once_the_picture_was_disturbed(self):
+        a = _doc(texture=40, seed=1)
+        b = _same_template_other_fields(a)
+        det = DocumentDetector(_cfg())
+        sig = det.document_signature(a)
+        strict = [det.document_replaced(b.copy(), sig) for _ in range(10)]
+        assert strict[-1] is False  # untouched picture: a modest difference is not believed
+        det2 = DocumentDetector(_cfg())
+        sig2 = det2.document_signature(a)
+        relaxed = [det2.document_replaced(b.copy(), sig2, disturbed=True) for _ in range(10)]
+        assert relaxed[-1] is True
+
+    def test_the_same_page_never_counts_as_replaced_even_when_disturbed(self):
+        det = DocumentDetector(_cfg())
+        a = _doc(texture=40, seed=1)
+        sig = det.document_signature(a)
+        assert not any(det.document_replaced(a.copy(), sig, disturbed=True) for _ in range(12))
+
+    def test_with_the_background_check_a_candidate_that_is_only_background_never_replaces(self):
+        cfg = DetectionConfig(min_geometry_confidence=0.25, background_check=True, background_warmup_frames=4)
+        det = DocumentDetector(cfg)
+        scene = _doc()
+        for _ in range(12):
+            det.detect(scene.copy())  # learns the background
+        assert det._bg_thumb is not None
+        sig = det.document_signature(scene)
+        moved = _doc(margin_x=200, margin_y=150)
+        det._is_background = lambda *a, **k: True  # whatever stands there still looks like the learned background
+        assert not any(det.document_replaced(moved.copy(), sig) for _ in range(12))
+        det._is_background = lambda *a, **k: False
+        assert any(det.document_replaced(moved.copy(), sig) for _ in range(12))
+
+    @pytest.mark.asyncio
+    async def test_a_swap_to_a_card_of_the_same_template_after_a_hand_took_the_page_away(self, tmp_path):
+        orch = _orch(tmp_path)
+        a = _doc(texture=40, seed=1)
+        b = _same_template_other_fields(a)
+        orch._doc_signature = orch.detector.document_signature(a)
+        orch.sm.state = AppState.WAITING_FOR_REMOVAL
+        txn = ActiveCaptureTransaction(capture_id="cap-tpl")
+        txn.mark_completed()
+        orch._transaction = txn
+        orch._removal_disturbance = 0
+        hand = _doc(margin_x=150, margin_y=120, paper=120)
+        sequence = [hand, hand.copy(), a] + [b] * 12  # a hand moves in, then the new card stays
+        orch._safe_preview = AsyncMock(side_effect=sequence)
+        for _ in range(len(sequence)):
+            await orch._removal_tick()
+            if orch.sm.state != AppState.WAITING_FOR_REMOVAL:
+                break
+        assert orch.sm.state == AppState.DOCUMENT_DETECTED
+
+    @pytest.mark.asyncio
+    async def test_the_same_card_left_untouched_is_not_captured_twice(self, tmp_path):
+        orch = _orch(tmp_path)
+        a = _doc(texture=40, seed=1)
+        orch._doc_signature = orch.detector.document_signature(a)
+        orch.sm.state = AppState.WAITING_FOR_REMOVAL
+        txn = ActiveCaptureTransaction(capture_id="cap-once")
+        txn.mark_completed()
+        orch._transaction = txn
+        orch._safe_preview = AsyncMock(return_value=a)
+        for _ in range(20):
+            await orch._removal_tick()
+        assert orch.sm.state == AppState.WAITING_FOR_REMOVAL

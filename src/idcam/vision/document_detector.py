@@ -33,6 +33,10 @@ _SIG_SIZE = (64, 48)  # grey patch of a captured document, to recognise a differ
 _REPLACE_CALM_FRAMES = 5  # the picture must have been still this long before "replaced" is believed
 _REPLACE_MIN_IOU = 0.5  # a new outline overlapping the old one less than this is another document
 _REPLACE_MIN_NCC = 0.8  # correlation of the old document's area with itself now; lower = different content
+# After the picture was disturbed (a hand took the document away) the same page rarely comes back looking
+# identical, but two cards of the same template do look alike: then a smaller change is enough.
+_REPLACE_MIN_IOU_DISTURBED = 0.9
+_REPLACE_MIN_NCC_DISTURBED = 0.95
 
 
 class DocumentPresence(str, Enum):
@@ -338,21 +342,38 @@ class DocumentDetector:
         patch = self._signature_patch(frame, bbox)  # type: ignore[arg-type]
         return None if patch is None else DocumentSignature(tuple(int(v) for v in bbox), patch)  # type: ignore[arg-type]
 
-    def document_replaced(self, frame: np.ndarray, signature: DocumentSignature | None) -> bool:
+    @property
+    def calm_streak(self) -> int:
+        """Consecutive frames that looked like the previous analysed one (0 = the picture just changed)."""
+        return self._calm_streak
+
+    def document_replaced(
+        self, frame: np.ndarray, signature: DocumentSignature | None, *, disturbed: bool = False
+    ) -> bool:
         """True when the document in view is a different one than ``signature`` (swapped by the next person).
 
         Only believed when the picture has been still for a few frames (a hand passing is not a swap) and
-        a document-like outline is present. Either its outline barely overlaps the old one, or the old
-        area no longer correlates with what it showed.
+        a real document is present: the same bar as for a first detection (confidence, and not part of the
+        learned empty background), so a bare desk that scores 0.45-0.5 can never "replace" a document.
+        Either its outline barely overlaps the old one, or the old area no longer correlates with what it
+        showed. ``disturbed`` (the picture changed since the capture, e.g. a hand took the page away) makes
+        smaller differences count, which tells two cards of the same template apart.
         """
         if signature is None:
             return False
         geom = self._find_geometry(frame)  # also advances the calm counter for this frame
         if self._calm_streak < _REPLACE_CALM_FRAMES:
             return False
-        if geom is None or geom.confidence < self.config.min_geometry_confidence * 0.9:
+        if geom is None or geom.confidence < self.config.min_geometry_confidence:
             return False  # nothing there: the ordinary removal path handles it
-        if _bbox_iou(signature.bbox, tuple(geom.bbox)) < _REPLACE_MIN_IOU:
+        bbox = tuple(geom.bbox)
+        if self.config.background_check and self._bg_thumb is not None:
+            h, w = frame.shape[:2]
+            if self._is_background(self._bg_thumbnail(frame), bbox, (w, h)):
+                return False
+        min_iou = _REPLACE_MIN_IOU_DISTURBED if disturbed else _REPLACE_MIN_IOU
+        min_ncc = _REPLACE_MIN_NCC_DISTURBED if disturbed else _REPLACE_MIN_NCC
+        if _bbox_iou(signature.bbox, bbox) < min_iou:
             return True
         now = self._signature_patch(frame, signature.bbox)
         if now is None:
@@ -362,7 +383,7 @@ class DocumentDetector:
         denom = float(np.sqrt((a * a).sum() * (b * b).sum()))
         if denom < 1e-6:
             return False  # a flat area carries no content to compare
-        return float((a * b).sum()) / denom < _REPLACE_MIN_NCC
+        return float((a * b).sum()) / denom < min_ncc
 
     def refresh_lock(self, frame: np.ndarray) -> bool:
         """Re-lock when the outline in view no longer matches the lock (the page was swapped or moved)."""

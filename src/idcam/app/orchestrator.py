@@ -148,6 +148,7 @@ class ApplicationOrchestrator:
         # What the document of the current/last capture looked like, to notice that the next person
         # put a different one in its place without the scene ever being empty.
         self._doc_signature = None
+        self._removal_disturbance = 0  # frames in which the picture changed while waiting for the next document
         self._background: set[asyncio.Task] = set()
         self._last_scene_empty = False
         self._last_transition_reason = ""
@@ -445,7 +446,13 @@ class ApplicationOrchestrator:
                 self.led.set_remove_hint(False)
                 logger.info("event=auto_capture_armed reason=scene_cleared_after_failure")
             return
-        if self._awaiting_clear_scene and detected and self.detector.document_replaced(frame, self._doc_signature):
+        if self._awaiting_clear_scene and self.detector.calm_streak == 0:
+            self._removal_disturbance += 1
+        if (
+            self._awaiting_clear_scene
+            and detected
+            and self.detector.document_replaced(frame, self._doc_signature, disturbed=self._removal_disturbance >= 2)
+        ):
             logger.info("event=document_replaced state=IDLE failures=%d", self._consecutive_failures)
             self._awaiting_clear_scene = False
             self._clear_scene_count = 0
@@ -491,7 +498,7 @@ class ApplicationOrchestrator:
                 info = self.detector.debug_info()
                 logger.info(
                     "event=idle_no_document frames=%d motion=%.2f frame_motion=%.2f "
-                    "edge_density=%.4f reason=%s roi=%dx%d frame=%dx%d gray_std=%.1f",
+                    "edge_density=%.4f reason=%s roi=%dx%d frame=%dx%d gray_std=%.1f best_bbox=%s",
                     self._idle_reject_count,
                     info.motion,
                     info.frame_motion,
@@ -502,6 +509,7 @@ class ApplicationOrchestrator:
                     info.frame_width,
                     info.frame_height,
                     info.gray_std,
+                    info.document_roi,
                 )
 
     def _begin_transaction(self, *, trigger: str = "auto") -> ActiveCaptureTransaction:
@@ -1164,6 +1172,7 @@ class ApplicationOrchestrator:
         self._consecutive_failures = 0
         self._removal_count = 0
         self._removal_ticks = 0
+        self._removal_disturbance = 0
         self._last_scene_empty = False
         self._transition(AppState.WAITING_FOR_REMOVAL, reason="capture_success")
 
@@ -1182,11 +1191,16 @@ class ApplicationOrchestrator:
             return
         empty = self.detector.is_scene_empty(frame)
         self._last_scene_empty = empty
-        if not empty and self.detector.document_replaced(frame, self._doc_signature):
+        if self.detector.calm_streak == 0:
+            self._removal_disturbance += 1
+        if not empty and self.detector.document_replaced(
+            frame, self._doc_signature, disturbed=self._removal_disturbance >= 2
+        ):
             logger.info(
-                "event=document_replaced state=WAITING_FOR_REMOVAL waited_ms=%d count=%d",
+                "event=document_replaced state=WAITING_FOR_REMOVAL waited_ms=%d count=%d disturbed=%d",
                 int(self.sm.elapsed() * 1000),
                 self._removal_count,
+                self._removal_disturbance,
             )
             self._clear_transaction()
             self._awaiting_clear_scene = False
@@ -1431,6 +1445,7 @@ class ApplicationOrchestrator:
             }
         )
         self.stability.reset()
+        self._removal_disturbance = 0
         if dest == AppState.IDLE:
             self._awaiting_clear_scene = True
             self._clear_scene_count = 0
