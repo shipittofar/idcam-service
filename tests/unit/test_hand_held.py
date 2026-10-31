@@ -232,7 +232,7 @@ class TestHandShape:
 
     def test_the_hsv_branch_catches_skin_that_the_chroma_range_misses(self):
         warm = np.zeros((20, 20, 3), np.uint8)
-        warm[:] = (200, 120, 70)  # a tanned, warm-lit hand: orange hue
+        warm[:] = (200, 130, 95)  # a tanned, warm-lit hand: orange hue (not more saturated than skin gets)
         assert np.count_nonzero(dg.skin_pixels(warm)) > 0
         blue = np.zeros((20, 20, 3), np.uint8)
         blue[:] = (30, 60, 140)
@@ -317,3 +317,49 @@ class TestAsciiSnapshot:
 
         gray, cr = ascii_snapshot(np.full((120, 160, 3), 128, np.uint8))
         assert "Q" not in gray and len(gray.split("|")) == len(cr.split("|"))
+
+
+class TestDarkOrShadedHand:
+    """In the Pi's ASCII snapshots the hand was Y 25-75 with red chroma 132-156: a luma floor made the cue blind."""
+
+    @staticmethod
+    def _scene(card_color, hand_color, kind):
+        img, (x0, y0, w, h) = _card("dark", card_color, None, cx=960, cy=380, width=520, angle=2.0)
+        x1, y1 = x0 + w, y0 + h
+        if kind == "below":
+            cv2.ellipse(img, (int((x0 + x1) / 2), int(y1 + h * 0.35)), (int(w * 0.5), int(h * 0.45)), 0, 0, 360, hand_color, -1)
+            cv2.rectangle(img, (int((x0 + x1) / 2 - w * 0.3), int(y1 + h * 0.4)), (int((x0 + x1) / 2 + w * 0.3), H), hand_color, -1)
+        else:
+            cv2.ellipse(img, (int(x0 + w * 0.1), int(y1 - h * 0.08)), (int(w * 0.14), int(h * 0.2)), -30, 0, 360, hand_color, -1)
+            cv2.ellipse(img, (int(x0 - w * 0.15), int(y1 + h * 0.4)), (int(w * 0.45), int(h * 0.45)), -20, 0, 360, hand_color, -1)
+        return img, (x0, y0, w, h)
+
+    @pytest.mark.parametrize("hand", [(85, 55, 45), (110, 75, 60), (224, 172, 140)])
+    @pytest.mark.parametrize("card", [NAVY, (150, 160, 190), BURGUNDY])
+    @pytest.mark.parametrize("kind", ["below", "thumb"])
+    def test_the_box_is_the_card_whatever_the_tone_of_the_hand(self, hand, card, kind):
+        img, truth = self._scene(card, hand, kind)
+        geom = _detect(img)
+        assert geom is not None
+        assert dg._bbox_iou(truth, geom.bbox) >= 0.9, (hand, card, kind, geom.bbox)
+        assert geom.frame_skin > 0.02  # the cue saw the hand
+
+    def test_the_skin_classifier_accepts_dark_skin_and_refuses_dark_red_covers(self):
+        def is_skin(rgb):
+            px = np.zeros((4, 4, 3), np.uint8)
+            px[:] = rgb
+            return bool(np.count_nonzero(dg.skin_pixels(px)))
+
+        assert is_skin((85, 55, 45)) and is_skin((110, 75, 60)) and is_skin((224, 172, 140))
+        assert not is_skin(BURGUNDY) and not is_skin((72, 18, 30)) and not is_skin(NAVY) and not is_skin((130, 130, 130))
+
+
+class TestContainerBeatsInnerBlock:
+    def test_a_photo_block_inside_the_card_does_not_win_over_the_card(self):
+        img, truth = _card("dark", BURGUNDY, None, cx=960, cy=380, width=520, angle=2.0)
+        geom = _detect(img)
+        assert geom is not None and dg._bbox_iou(truth, geom.bbox) >= 0.9
+
+    def test_containment_helper(self):
+        assert dg._bbox_contained((120, 120, 50, 50), (100, 100, 200, 200))
+        assert not dg._bbox_contained((90, 120, 50, 50), (100, 100, 100, 100))  # sticks out by more than 5 %

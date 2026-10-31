@@ -389,6 +389,18 @@ def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> flo
     return inter / union if union > 0 else 0.0
 
 
+def _bbox_contained(inner: tuple[int, int, int, int], outer: tuple[int, int, int, int], slack: float = 0.05) -> bool:
+    """True when ``inner`` lies inside ``outer`` (to within ``slack`` of the outer's size)."""
+    ix, iy, iw, ih = inner
+    ox, oy, ow, oh = outer
+    return (
+        ix >= ox - slack * ow
+        and iy >= oy - slack * oh
+        and ix + iw <= ox + ow * (1 + slack)
+        and iy + ih <= oy + oh * (1 + slack)
+    )
+
+
 def _score_geometry(
     corners: tuple[tuple[int, int], ...],
     contour_area: float,
@@ -607,10 +619,14 @@ def _collect_from_mask(
 
 # Skin: a page held in a hand. Pixels of the hand are cut out of the masks (extra variants), and a
 # candidate that swallowed a hand is demoted. Fractions are of the candidate's box.
-_SKIN_LO = (70, 133, 77)  # YCrCb; the luma floor keeps dark reds (burgundy covers) out
+# YCrCb. No real luma floor: the hand in a log was Y 25-75 (a shaded or dark-skinned hand under a short
+# exposure metered on the bright desk) and a floor of 70 made the whole cue blind to it. Dark red covers
+# (burgundy: HSV saturation ~190-200 of 255) are told apart from dark skin (~110-130) by saturation.
+_SKIN_LO = (22, 133, 77)
 _SKIN_HI = (255, 185, 140)
+_SKIN_MAX_SATURATION = 165  # HSV S (0..255): more saturated than any skin
 # HSV (OpenCV: H 0..180): warm hues with some saturation, for light that shifts the chroma (tungsten, AWB)
-_SKIN_HSV_LO = (0, 45, 90)
+_SKIN_HSV_LO = (0, 45, 40)
 _SKIN_HSV_HI = (22, 190, 255)
 _SKIN_FRAME_MIN = 0.004  # less skin in the frame than this: no hand
 _SKIN_FRAME_MAX = 0.35  # more: the desk itself is skin-coloured (wood), the cue is useless
@@ -624,8 +640,10 @@ _SKIN_BASE_VARIANTS = ("bg_otsu", "bg_otsu_inv", "lab_bg_otsu", "otsu", "otsu_in
 def skin_pixels(rgb: np.ndarray) -> np.ndarray:
     """Raw mask (255 = skin-coloured) of an RGB image: YCrCb range OR warm-hue HSV range."""
     ycc = cv2.inRange(cv2.cvtColor(rgb, cv2.COLOR_RGB2YCrCb), _SKIN_LO, _SKIN_HI)
-    hsv = cv2.inRange(cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV), _SKIN_HSV_LO, _SKIN_HSV_HI)
-    return cv2.bitwise_or(ycc, hsv)
+    hsv_img = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    warm = cv2.inRange(hsv_img, _SKIN_HSV_LO, _SKIN_HSV_HI)
+    not_too_saturated = cv2.inRange(hsv_img, (0, 0, 0), (180, _SKIN_MAX_SATURATION, 255))
+    return cv2.bitwise_and(cv2.bitwise_or(ycc, warm), not_too_saturated)
 
 
 def _skin_mask(work: np.ndarray, change: np.ndarray | None = None) -> tuple[np.ndarray | None, float]:
@@ -771,6 +789,20 @@ def _detect_all(
     for geom in all_geoms:
         if all(_bbox_iou(geom.bbox, u.bbox) < 0.55 for u in unique):
             unique.append(geom)
+    # A photo block, a stamp or a text panel inside a document is a candidate of its own, and on a dark
+    # cover it can edge out the cover by a hair. When another candidate holds the winner entirely and is
+    # nearly as convincing, the document is the container.
+    chosen = unique[0]
+    for other in unique[1:]:
+        if (
+            other.area_fraction >= 2.0 * chosen.area_fraction
+            and other.rank >= 0.85 * chosen.rank
+            and _bbox_contained(chosen.bbox, other.bbox)
+        ):
+            chosen = other
+            break
+    if chosen is not unique[0]:
+        unique = [chosen] + [g for g in unique if g is not chosen]
     inv = 1.0 / ratio
     alternatives = tuple(
         (
