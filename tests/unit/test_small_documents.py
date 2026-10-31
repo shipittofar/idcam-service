@@ -100,7 +100,7 @@ class TestPassportSizedDocuments:
         assert _detect(_desk(desk, 5)) is None or _detect(_desk(desk, 5)).confidence < 0.42
 
     def test_too_small_to_capture_is_not_reported(self):
-        img, _truth = _scene("dark", WHITE_PAGE, 160, 0)  # 0.9 % of the frame
+        img, _truth = _scene("dark", WHITE_PAGE, 90, 0)  # 0.3 % of the frame: a coin, not a document
         geom = _detect(img)
         assert geom is None or geom.confidence < 0.42
 
@@ -152,5 +152,48 @@ class TestDocumentNearTheFrameEdges:
         assert dg._bbox_iou(truth, geom.bbox) >= 0.6
 
     @pytest.mark.parametrize("desk", ["wood", "dark", "white"])
-    def test_an_empty_desk_still_yields_nothing(self, desk):
-        assert _detect(_desk(desk, 1)) is None
+    def test_an_empty_desk_never_yields_a_document_sized_candidate(self, desk):
+        geom = _detect(_desk(desk, 1))
+        # weak outlines of the noise may exist now that ID-card sized areas are admitted, far below the threshold
+        assert geom is None or geom.confidence < DetectionConfig().min_geometry_confidence * 0.6
+
+
+def _card_scene(kind, color, width, cx, cy, angle=6.0):
+    """An ID-1 card (85.6 x 54 mm) with a photo block and text lines."""
+    img = _desk(kind, 1)
+    height = width * 54 / 85.6
+    r = np.deg2rad(angle)
+    rot = np.array([[np.cos(r), -np.sin(r)], [np.sin(r), np.cos(r)]])
+    corners = np.array([[-width / 2, -height / 2], [width / 2, -height / 2], [width / 2, height / 2], [-width / 2, height / 2]])
+    quad = corners @ rot.T + [cx, cy]
+    cv2.fillPoly(img, [quad.astype(np.int32)], color)
+    x0, y0 = quad.min(0).astype(int)
+    dark = tuple(int(v * 0.6) for v in color)
+    cv2.rectangle(img, (x0 + int(width * 0.08), y0 + int(height * 0.25)), (x0 + int(width * 0.3), y0 + int(height * 0.7)), dark, -1)
+    for i in range(4):
+        y = y0 + int(height * (0.3 + i * 0.12))
+        cv2.line(img, (x0 + int(width * 0.4), y), (x0 + int(width * 0.9), y), tuple(int(v * 0.5) for v in color), 2)
+    x1, y1 = quad.max(0)
+    return img, (int(x0), int(y0), int(x1 - x0), int(y1 - y0))
+
+
+CARD_POSITIONS = {
+    "centre": (960, 540), "left": (190, 540), "right": (1730, 540), "top": (960, 110), "bottom": (960, 970),
+    "top-left": (190, 110), "top-right": (1730, 110), "bottom-left": (190, 970), "bottom-right": (1730, 970),
+}
+
+
+class TestIdCardSizedDocuments:
+    """A national ID card is ~1.5 % of a 1080p frame at 220 px wide; the old 2 % floor dropped it everywhere."""
+
+    @pytest.mark.parametrize("position", list(CARD_POSITIONS))
+    @pytest.mark.parametrize("desk,color", [("wood", (190, 150, 90)), ("wood", WHITE_PAGE), ("dark", (190, 150, 90)), ("dark", WHITE_PAGE)])
+    def test_detected_anywhere_in_view(self, desk, color, position):
+        img, truth = _card_scene(desk, color, 220, *CARD_POSITIONS[position])
+        geom = _detect(img)
+        assert geom is not None, position
+        assert geom.confidence >= DetectionConfig().min_geometry_confidence, (position, geom.confidence)
+        assert dg._bbox_iou(truth, geom.bbox) >= 0.6
+
+    def test_the_default_minimum_area_admits_an_id_card(self):
+        assert DetectionConfig().geometry_min_area_fraction <= 0.012

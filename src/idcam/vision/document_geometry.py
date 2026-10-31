@@ -394,7 +394,7 @@ def _score_geometry(
         return _reject("area_too_small")
     if area_fraction > max_area_fraction:
         return _reject("area_too_large")
-    if bw < w * 0.08 or bh < h * 0.08:
+    if bw < w * 0.05 or bh < h * 0.05:
         return _reject("bbox_too_small")
     if aspect < 0.3 or aspect > 3.2:
         return _reject("aspect_ratio_out_of_range")

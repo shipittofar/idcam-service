@@ -188,7 +188,7 @@ class DetectionConfig(BaseModel):
     background_warmup_frames: int = Field(10, ge=2, le=200)
     background_refresh_frames: int = Field(60, ge=10, le=2000)
     background_give_up_frames: int = Field(200, ge=20, le=5000)
-    geometry_min_area_fraction: float = Field(0.02, gt=0, le=1.0)  # passport-size page at 3% of the frame
+    geometry_min_area_fraction: float = Field(0.008, gt=0, le=1.0)  # passport-size page at 3% of the frame
     geometry_max_area_fraction: float = Field(0.85, gt=0, le=1.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)
 
