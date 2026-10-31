@@ -732,7 +732,7 @@ class DocumentDetector:
             return None
         diff = thumb - self._bg_thumb
         offset = np.median(diff.reshape(-1, diff.shape[-1]), axis=0)  # global exposure shift
-        changed = (np.abs(diff - offset).max(axis=2) > 22.0).astype(np.uint8) * 255
+        changed = (np.abs(diff - offset).max(axis=2) > 14.0).astype(np.uint8) * 255
         return cv2.dilate(changed, np.ones((3, 3), np.uint8))
 
     def _looks_like_background(self, thumb: np.ndarray) -> bool:

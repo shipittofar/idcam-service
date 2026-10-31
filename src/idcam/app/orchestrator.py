@@ -6,6 +6,7 @@ import asyncio
 import os
 import shutil
 import signal
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -66,6 +67,22 @@ ONE_SHOT_STATES = frozenset({
     AppState.PROCESSING_RESPONSE,
     AppState.SUCCESS,
 })
+
+
+def _git_commit() -> str:
+    """Short hash of the checked-out commit ("unknown" outside a git checkout): shows what is really running."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 class ApplicationOrchestrator:
@@ -266,6 +283,7 @@ class ApplicationOrchestrator:
             return
         self._transition(AppState.IDLE)
         logger.info("Application ready")
+        logger.info("event=app_build version=%s commit=%s", __version__, _git_commit())
 
     async def _main_loop(self) -> None:
         frame_interval = 1.0 / self.config.camera.preview_fps
@@ -481,7 +499,7 @@ class ApplicationOrchestrator:
         if detected:
             logger.info(
                 "event=document_detected confidence=%.2f area=%.3f roi=%s method=%s skin=%.2f fill=%.2f "
-                "frame_skin=%.3f led=%s motion=%.2f edge_density=%.4f latency_ms=%d alts=%s",
+                "frame_skin=%.3f skin_raw=%.3f led=%s motion=%.2f edge_density=%.4f latency_ms=%d alts=%s",
                 self.detector.debug_info().geometry_confidence,
                 getattr(self.detector._last_geometry, "area_fraction", 0.0),
                 self.detector.debug_info().document_roi,
@@ -489,6 +507,7 @@ class ApplicationOrchestrator:
                 getattr(self.detector._last_geometry, "skin_fraction", 0.0),
                 getattr(self.detector._last_geometry, "quad_fill", 1.0),
                 getattr(self.detector._last_geometry, "frame_skin", 0.0),
+                getattr(self.detector._last_geometry, "skin_raw", 0.0),
                 "on" if self.led.config.enabled else "off",
                 self.detector.last_motion,
                 self.detector.last_edge_density,

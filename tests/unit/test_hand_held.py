@@ -91,8 +91,8 @@ class TestHeldPage:
 
     def test_a_desk_that_is_skin_coloured_switches_the_cue_off(self):
         img = np.full((H, W, 3), SKIN, np.uint8)
-        mask, fraction = dg._skin_mask(cv2.resize(img, (640, 360)))
-        assert mask is None and fraction > 0.9  # the whole frame is "skin": useless
+        mask, fraction, raw = dg._skin_mask(cv2.resize(img, (640, 360)))
+        assert mask is None and fraction > 0.9 and raw > 0.9  # the whole frame is "skin": useless
 
 
 class TestRanking:
@@ -363,3 +363,35 @@ class TestContainerBeatsInnerBlock:
     def test_containment_helper(self):
         assert dg._bbox_contained((120, 120, 50, 50), (100, 100, 200, 200))
         assert not dg._bbox_contained((90, 120, 50, 50), (100, 100, 100, 100))  # sticks out by more than 5 %
+
+
+class TestDarkHandOnADarkDesk:
+    """The 'new pixels only' restriction must not blind the cue when the desk is not skin-coloured."""
+
+    def test_a_hand_only_slightly_brighter_than_the_dark_desk_is_still_seen(self):
+        desk = np.full((360, 640, 3), (30, 30, 32), np.uint8)
+        frame = desk.copy()
+        cv2.ellipse(frame, (320, 250), (110, 70), 0, 0, 360, (62, 40, 33), -1)  # a hand: barely above the desk
+        change = (np.abs(frame.astype(np.int16) - desk.astype(np.int16)).max(axis=2) > 40).astype(np.uint8) * 255
+        mask, fraction, raw = dg._skin_mask(frame, change)  # a strict change mask would erase the whole hand
+        assert mask is not None and 0.05 < fraction < 0.3 and abs(fraction - raw) < 1e-6
+
+    def test_the_restriction_still_applies_when_everything_is_skin_coloured(self):
+        desk = np.full((360, 640, 3), (196, 150, 118), np.uint8)
+        frame = desk.copy()
+        cv2.ellipse(frame, (320, 250), (110, 70), 0, 0, 360, (228, 176, 142), -1)
+        change = (np.abs(frame.astype(np.int16) - desk.astype(np.int16)).max(axis=2) > 14).astype(np.uint8) * 255
+        mask, fraction, raw = dg._skin_mask(frame, change)
+        assert raw > 0.35 and mask is not None and 0.05 < fraction < 0.3  # only the hand is new AND skin-coloured
+
+    def test_the_log_shows_the_raw_fraction_even_when_the_cue_is_off(self):
+        desk = np.full((360, 640, 3), (30, 30, 32), np.uint8)
+        mask, fraction, raw = dg._skin_mask(desk)
+        assert mask is None and raw == 0.0
+
+
+def test_the_running_build_can_be_logged():
+    from idcam.app.orchestrator import _git_commit
+
+    commit = _git_commit()
+    assert isinstance(commit, str) and commit

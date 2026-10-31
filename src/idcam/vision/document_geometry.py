@@ -33,7 +33,8 @@ class DocumentGeometry:
     contrast_score: float = 0.0
     skin_fraction: float = 0.0  # share of the box that is skin-coloured (a hand holding the page)
     quad_fill: float = 1.0  # outline area / area of the fitted quadrilateral (a page fills it, a hand blob does not)
-    frame_skin: float = 0.0  # share of the whole frame that was skin-coloured AND new (0 = cue off or no hand)
+    frame_skin: float = 0.0  # share of the whole frame the hand cue used (0 = cue off or no hand)
+    skin_raw: float = 0.0  # share of the whole frame that is skin-coloured, before any restriction (for the log)
     # The best candidates of the last analysis as (method, bbox, confidence, skin_fraction, quad_fill), for logs.
     alternatives: tuple = ()
 
@@ -646,25 +647,29 @@ def skin_pixels(rgb: np.ndarray) -> np.ndarray:
     return cv2.bitwise_and(cv2.bitwise_or(ycc, warm), not_too_saturated)
 
 
-def _skin_mask(work: np.ndarray, change: np.ndarray | None = None) -> tuple[np.ndarray | None, float]:
-    """(mask of skin-coloured pixels dilated a little, fraction of the frame it covers).
+def _skin_mask(work: np.ndarray, change: np.ndarray | None = None) -> tuple[np.ndarray | None, float, float]:
+    """(mask of skin-coloured pixels dilated a little, fraction of the frame it covers, raw fraction).
 
-    ``change`` (non-zero = differs from the learned empty scene) limits it to pixels that are NEW: a wooden
-    or tan desk is skin-coloured everywhere, but only the hand is both skin-coloured and new. The mask is
-    None when there is no hand-sized amount of skin (or too much: the cue is useless).
+    The skin-coloured pixels are used as they are when they make up a hand-sized part of the frame. Only
+    when there are far too many (a wooden or tan desk is skin-coloured everywhere) are they limited to
+    pixels that are NEW against the learned empty scene (``change``, non-zero = differs): the hand is both
+    skin-coloured and new. Limiting them always was a mistake for a dark hand on a dark desk, where the
+    difference is small. The mask is None when no hand-sized amount of skin is found.
     """
     if work.ndim != 3 or work.shape[2] != 3:
-        return None, 0.0
-    mask = skin_pixels(work)
-    if change is not None:
-        if change.shape[:2] != mask.shape[:2]:
-            change = cv2.resize(change, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST)
-        mask = cv2.bitwise_and(mask, change)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    fraction = float(np.count_nonzero(mask)) / mask.size
+        return None, 0.0, 0.0
+    raw = cv2.morphologyEx(skin_pixels(work), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    raw_fraction = float(np.count_nonzero(raw)) / raw.size
+    mask, fraction = raw, raw_fraction
+    if raw_fraction >= _SKIN_FRAME_MAX and change is not None:
+        if change.shape[:2] != raw.shape[:2]:
+            change = cv2.resize(change, (raw.shape[1], raw.shape[0]), interpolation=cv2.INTER_NEAREST)
+        mask = cv2.bitwise_and(raw, change)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        fraction = float(np.count_nonzero(mask)) / mask.size
     if not _SKIN_FRAME_MIN < fraction < _SKIN_FRAME_MAX:
-        return None, fraction
-    return cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1), fraction
+        return None, fraction, raw_fraction
+    return cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1), fraction, raw_fraction
 
 
 _DETECT_MAX_DIM = 640
@@ -705,6 +710,7 @@ def _rescale_geometry(geom: DocumentGeometry, factor: float, frame_shape: tuple[
         skin_fraction=geom.skin_fraction,
         quad_fill=geom.quad_fill,
         frame_skin=geom.frame_skin,
+        skin_raw=geom.skin_raw,
         alternatives=geom.alternatives,
     )
 
@@ -754,7 +760,7 @@ def _detect_all(
     all_reports: list[GeometryCandidateDiag] = []
 
     variants = _binary_variants(gray, scale, lab)
-    skin, skin_frame = _skin_mask(work, change_mask)
+    skin, skin_frame, skin_raw = _skin_mask(work, change_mask)
     if skin is not None:
         not_skin = cv2.bitwise_not(skin)
         variants = variants + [
@@ -814,7 +820,12 @@ def _detect_all(
         )
         for g in unique[:4]
     )
-    best = replace(unique[0], frame_skin=round(skin_frame if skin is not None else 0.0, 3), alternatives=alternatives)
+    best = replace(
+        unique[0],
+        frame_skin=round(skin_frame if skin is not None else 0.0, 3),
+        skin_raw=round(skin_raw, 3),
+        alternatives=alternatives,
+    )
     if ratio < 1.0:
         best = _rescale_geometry(best, inv, frame.shape)
     return best, all_reports, best.detection_method
