@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -33,6 +33,9 @@ class DocumentGeometry:
     contrast_score: float = 0.0
     skin_fraction: float = 0.0  # share of the box that is skin-coloured (a hand holding the page)
     quad_fill: float = 1.0  # outline area / area of the fitted quadrilateral (a page fills it, a hand blob does not)
+    frame_skin: float = 0.0  # share of the whole frame that was skin-coloured AND new (0 = cue off or no hand)
+    # The best candidates of the last analysis as (method, bbox, confidence, skin_fraction, quad_fill), for logs.
+    alternatives: tuple = ()
 
     @property
     def swallows_hand(self) -> bool:
@@ -51,9 +54,13 @@ class DocumentGeometry:
         Its own ``confidence`` (what the detection threshold sees) is untouched: a page that is only
         found together with the hand must still be found.
         """
+        rank = self.confidence
+        if self.quad_fill < _RANK_FILL_FULL:
+            # an outline with bites out of it (a hand, an arm) is not a clean page, whatever colour the hand is
+            rank *= max(0.5, (self.quad_fill / _RANK_FILL_FULL) ** 2)
         if self.swallows_hand:
-            return self.confidence * max(0.35, 1.0 - 1.6 * (min(self.skin_fraction, 0.6) - _SKIN_PENALTY_FROM))
-        return self.confidence
+            rank *= max(0.35, 1.0 - 1.6 * (min(self.skin_fraction, 0.6) - _SKIN_PENALTY_FROM))
+        return rank
 
 
 @dataclass
@@ -610,6 +617,7 @@ _SKIN_FRAME_MAX = 0.35  # more: the desk itself is skin-coloured (wood), the cue
 _SKIN_PENALTY_FROM = 0.06
 _SKIN_DOCUMENT_ABOVE = 0.6
 _SKIN_CLEAN_FILL = 0.88  # a skin-coloured box that fills its quadrilateral this well is a page, not a hand
+_RANK_FILL_FULL = 0.90  # quad_fill at or above this ranks at full confidence
 _SKIN_BASE_VARIANTS = ("bg_otsu", "bg_otsu_inv", "lab_bg_otsu", "otsu", "otsu_inv")
 
 
@@ -620,16 +628,25 @@ def skin_pixels(rgb: np.ndarray) -> np.ndarray:
     return cv2.bitwise_or(ycc, hsv)
 
 
-def _skin_mask(work: np.ndarray) -> np.ndarray | None:
-    """Mask of skin-coloured pixels (dilated a little), or None when there is no hand-sized amount of it."""
+def _skin_mask(work: np.ndarray, change: np.ndarray | None = None) -> tuple[np.ndarray | None, float]:
+    """(mask of skin-coloured pixels dilated a little, fraction of the frame it covers).
+
+    ``change`` (non-zero = differs from the learned empty scene) limits it to pixels that are NEW: a wooden
+    or tan desk is skin-coloured everywhere, but only the hand is both skin-coloured and new. The mask is
+    None when there is no hand-sized amount of skin (or too much: the cue is useless).
+    """
     if work.ndim != 3 or work.shape[2] != 3:
-        return None
+        return None, 0.0
     mask = skin_pixels(work)
+    if change is not None:
+        if change.shape[:2] != mask.shape[:2]:
+            change = cv2.resize(change, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+        mask = cv2.bitwise_and(mask, change)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     fraction = float(np.count_nonzero(mask)) / mask.size
     if not _SKIN_FRAME_MIN < fraction < _SKIN_FRAME_MAX:
-        return None
-    return cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
+        return None, fraction
+    return cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1), fraction
 
 
 _DETECT_MAX_DIM = 640
@@ -669,6 +686,8 @@ def _rescale_geometry(geom: DocumentGeometry, factor: float, frame_shape: tuple[
         contrast_score=geom.contrast_score,
         skin_fraction=geom.skin_fraction,
         quad_fill=geom.quad_fill,
+        frame_skin=geom.frame_skin,
+        alternatives=geom.alternatives,
     )
 
 
@@ -680,6 +699,7 @@ def _detect_all(
     min_rectangularity: float = 0.42,
     min_contrast: float = 0.018,
     touch_penalty_vertical: float = 0.7,
+    change_mask: np.ndarray | None = None,
 ) -> tuple[DocumentGeometry | None, list[GeometryCandidateDiag], str | None]:
     if frame is None or frame.size == 0:
         return None, [], "empty_frame"
@@ -716,7 +736,7 @@ def _detect_all(
     all_reports: list[GeometryCandidateDiag] = []
 
     variants = _binary_variants(gray, scale, lab)
-    skin = _skin_mask(work)
+    skin, skin_frame = _skin_mask(work, change_mask)
     if skin is not None:
         not_skin = cv2.bitwise_not(skin)
         variants = variants + [
@@ -751,9 +771,20 @@ def _detect_all(
     for geom in all_geoms:
         if all(_bbox_iou(geom.bbox, u.bbox) < 0.55 for u in unique):
             unique.append(geom)
-    best = unique[0]
+    inv = 1.0 / ratio
+    alternatives = tuple(
+        (
+            g.detection_method,
+            tuple(int(round(v * inv)) for v in g.bbox),
+            round(g.confidence, 2),
+            round(g.skin_fraction, 2),
+            round(g.quad_fill, 2),
+        )
+        for g in unique[:4]
+    )
+    best = replace(unique[0], frame_skin=round(skin_frame if skin is not None else 0.0, 3), alternatives=alternatives)
     if ratio < 1.0:
-        best = _rescale_geometry(best, 1.0 / ratio, frame.shape)
+        best = _rescale_geometry(best, inv, frame.shape)
     return best, all_reports, best.detection_method
 
 
@@ -766,8 +797,13 @@ def detect_document_geometry(
     min_edge_strength: float = 8.0,  # kept for API compat; contrast path used internally
     min_contrast: float = 0.018,
     touch_penalty_vertical: float = 0.7,
+    change_mask: np.ndarray | None = None,
 ) -> DocumentGeometry | None:
-    """Detect document quadrilateral using multi-strategy segmentation."""
+    """Detect document quadrilateral using multi-strategy segmentation.
+
+    ``change_mask`` (any size, non-zero = differs from the learned empty scene) lets the hand cue work on
+    a skin-coloured desk.
+    """
     _ = min_edge_strength
     best, _, _ = _detect_all(
         frame,
@@ -776,6 +812,7 @@ def detect_document_geometry(
         min_rectangularity=min_rectangularity,
         min_contrast=min_contrast,
         touch_penalty_vertical=touch_penalty_vertical,
+        change_mask=change_mask,
     )
     return best
 

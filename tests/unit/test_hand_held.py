@@ -91,7 +91,8 @@ class TestHeldPage:
 
     def test_a_desk_that_is_skin_coloured_switches_the_cue_off(self):
         img = np.full((H, W, 3), SKIN, np.uint8)
-        assert dg._skin_mask(cv2.resize(img, (640, 360))) is None  # the whole frame is "skin": useless
+        mask, fraction = dg._skin_mask(cv2.resize(img, (640, 360)))
+        assert mask is None and fraction > 0.9  # the whole frame is "skin": useless
 
 
 class TestRanking:
@@ -236,3 +237,63 @@ class TestHandShape:
         blue = np.zeros((20, 20, 3), np.uint8)
         blue[:] = (30, 60, 140)
         assert np.count_nonzero(dg.skin_pixels(blue)) == 0
+
+
+class TestSkinColouredDesk:
+    """On a tan/wood desk everything is skin-coloured; only pixels that are NEW (vs the learned empty desk) count."""
+
+    DESK = (196, 150, 118)
+
+    def _scene(self, hand):
+        rng = np.random.default_rng(1)
+        desk = np.clip(np.full((H, W, 3), self.DESK, np.float32) + rng.normal(0, 3, (H, W, 3)), 0, 255).astype(np.uint8)
+        img = desk.copy()
+        w = 420
+        h = int(w * 54 / 85.6)
+        x0, y0 = 960 - w // 2, 470 - h // 2
+        cv2.rectangle(img, (x0, y0), (x0 + w, y0 + h), NAVY, -1)
+        if hand:
+            s = (228, 176, 142)
+            cv2.ellipse(img, (x0 + int(w * 0.08), y0 + h - int(h * 0.1)), (int(w * 0.16), int(h * 0.2)), -30, 0, 360, s, -1)
+            cv2.ellipse(img, (x0 - int(w * 0.2), y0 + h + int(h * 0.4)), (int(w * 0.5), int(h * 0.5)), -20, 0, 360, s, -1)
+        return desk, img, (x0, y0, w, h)
+
+    def test_without_the_change_mask_the_cue_is_off_on_such_a_desk(self):
+        _, img, _ = self._scene(True)
+        geom = _detect(img)
+        assert geom is not None and geom.frame_skin == 0.0
+
+    def test_with_the_change_mask_only_the_hand_counts_as_skin(self):
+        desk, img, truth = self._scene(True)
+        change = (np.abs(img.astype(np.int16) - desk.astype(np.int16)).max(axis=2) > 22).astype(np.uint8) * 255
+        geom = _detect(img, change_mask=change)
+        assert geom is not None and 0.02 < geom.frame_skin < 0.2
+        assert dg._bbox_iou(truth, geom.bbox) >= 0.9
+
+    def test_the_detector_builds_the_change_mask_from_its_learned_background(self):
+        desk, img, _ = self._scene(True)
+        det = DocumentDetector(DetectionConfig(background_check=True, background_warmup_frames=3))
+        assert det._change_mask(desk) is None  # nothing learned yet
+        for _ in range(8):
+            det.detect(desk.copy())
+        mask = det._change_mask(img)
+        assert mask is not None and mask.dtype == np.uint8 and np.count_nonzero(mask) > 0
+        assert np.count_nonzero(det._change_mask(desk)) == 0  # the empty desk itself has no changed pixels
+
+
+class TestDiagnosticsAndFill:
+    def test_the_best_candidates_are_listed_for_the_log(self):
+        img, _ = _card("dark", NAVY, "below")
+        geom = _detect(img)
+        assert geom is not None and 1 <= len(geom.alternatives) <= 4
+        method, bbox, conf, skin, fill = geom.alternatives[0]
+        assert isinstance(method, str) and len(bbox) == 4 and 0 <= conf <= 1
+
+    def test_an_outline_with_bites_out_of_it_ranks_below_a_clean_one_of_equal_confidence(self):
+        base = dict(
+            corners=((0, 0), (10, 0), (10, 10), (0, 10)), bbox=(0, 0, 10, 10), center=(5, 5), width=10, height=10,
+            rotation_deg=0.0, aspect_ratio=1.0, area_fraction=0.1, confidence=0.6, edge_strength=1.0, rectangularity=1.0,
+        )
+        clean = dg.DocumentGeometry(quad_fill=0.98, **base)
+        bitten = dg.DocumentGeometry(quad_fill=0.7, **base)
+        assert bitten.confidence == clean.confidence and bitten.rank < clean.rank

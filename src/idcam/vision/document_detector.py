@@ -239,6 +239,7 @@ class DocumentDetector:
             min_area_fraction=self.config.geometry_min_area_fraction,
             max_area_fraction=self.config.geometry_max_area_fraction,
             touch_penalty_vertical=self.config.geometry_touch_penalty_vertical,
+            change_mask=self._change_mask(frame),
         )
         self._last_geometry = geom
         self._geometry_frame = frame
@@ -691,6 +692,18 @@ class DocumentDetector:
             if self._is_background(thumb, tuple(geom.bbox), (w, h)) or self._looks_like_background(thumb):
                 return True
         return False
+
+    def _change_mask(self, frame: np.ndarray) -> np.ndarray | None:
+        """Where the picture differs from the learned empty scene (small mask; None while not learned)."""
+        if not self.config.background_check or self._bg_thumb is None:
+            return None
+        thumb = self._bg_thumbnail(frame)
+        if thumb.shape != self._bg_thumb.shape:
+            return None
+        diff = thumb - self._bg_thumb
+        offset = np.median(diff.reshape(-1, diff.shape[-1]), axis=0)  # global exposure shift
+        changed = (np.abs(diff - offset).max(axis=2) > 22.0).astype(np.uint8) * 255
+        return cv2.dilate(changed, np.ones((3, 3), np.uint8))
 
     def _looks_like_background(self, thumb: np.ndarray) -> bool:
         """The whole picture matches the learned empty scene (after removing a global exposure shift)."""
