@@ -80,6 +80,10 @@ detection:
   # Ignore "documents" that are really the always-there scene (furniture, a mat, cables, shadows):
   # the empty desk is learned at start and a candidate must differ from it. Costs ~2 s after each start.
   # background_check: true
+  # Pages near the top/bottom edge of the (short) view and pages held in a hand:
+  # geometry_touch_penalty_vertical: 0.8   # 1.0 = no penalty for a page touching the top/bottom edge, 0.7 = strict
+  # hand_confidence_relax: 0.05            # less confidence needed when found with the hand's pixels cut out
+  # hand_corner_motion_px: 10.0            # a held page is still when its corners move less than this per frame
   # background_min_diff: 10.0
   stability_sensitivity: 0.4     # 1.0 = original motion tolerance; 0.4 = 60% less sensitive (threshold 8/0.4 = 20)
   removal_frames_required: 10

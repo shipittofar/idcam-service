@@ -797,7 +797,9 @@ class ApplicationOrchestrator:
             return
         if await self._abort_if_document_gone(frame):
             return
-        if self.stability.update(frame):
+        # A page held in a hand is judged by how far its corners move, not by the picture difference.
+        corners = await asyncio.to_thread(self.detector.current_corners, frame) if self.stability.hand_present else None
+        if self.stability.update(frame, corners=corners):
             self._publish_debug(frame)
             logger.info(
                 "event=pipeline_stage stage=stability_confirmed frames=%d motion=%.2f",

@@ -164,6 +164,12 @@ See `config.example.yaml`. Key settings:
 
 Environment overrides: `IDCAM_CONFIG`, `IDCAM_AUTH_TOKEN`, `IDCAM_DEVICE_ID`, `IDCAM_SERVER_URL`, `IDCAM_ENV`, `IDCAM_MOCK_CAMERA`.
 
+## Pages held in a hand
+
+A page held in the fingers is found with the hand cut out: when a hand-sized amount of skin colour is in view, extra segmentation variants without the skin pixels are tried, and a candidate that swallowed the hand ranks below one that did not (its own confidence is unchanged, and a hand-free candidate needs `detection.hand_confidence_relax` less). While skin is next to the page its stability is judged by how far the corners move between frames (`detection.hand_corner_motion_px`, default 10 px), because the picture-difference measure cannot tell a tremor from a real move. Limits: dark red and brown covers are close to skin colour (a luma floor keeps burgundy out, tan/orange pages are not separated from a hand by colour), and a hand covering two sides of a page lowers its confidence below the threshold.
+
+`detection.geometry_touch_penalty_vertical` (default 0.8) eases the penalty for a page touching the top or bottom edge of the frame; with `background_check` a value up to 0.9 is safe.
+
 ## False detections (something always in view)
 
 `detection.background_check: true` makes the detector learn what the empty scene looks like (the first ~2 s after a start, once the picture is calm) and ignore a "document" whose area still looks like that background: furniture, a mat, cables, shadows that are always there. The idle log line shows `reason=static_background` for those. It keeps refreshing the background while nothing is detected (follows slow light changes). Limits: a document already lying there when the service starts counts as background until it is taken away and put back; a very large always-present object can hide a small document placed on it; if the picture never gets calm the check is skipped (`background_check_skipped`). Together with `detect_min_iou` (the same outline in consecutive frames) and `min_geometry_confidence`. Off by default.

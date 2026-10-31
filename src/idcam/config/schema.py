@@ -190,6 +190,16 @@ class DetectionConfig(BaseModel):
     background_give_up_frames: int = Field(200, ge=20, le=5000)
     geometry_min_area_fraction: float = Field(0.008, gt=0, le=1.0)  # passport-size page at 3% of the frame
     geometry_max_area_fraction: float = Field(0.85, gt=0, le=1.0)
+    # Confidence multiplier for a page that touches the top or the bottom edge of the frame (it may be cut
+    # off). The view is short, so pages flush with those edges are common: 1.0 = no penalty, 0.7 = strict.
+    # Sides keep 0.7. Pair a value above 0.7 with background_check so the desk edge cannot take its place.
+    geometry_touch_penalty_vertical: float = Field(0.8, gt=0.0, le=1.0)
+    # A page held in a hand: the fingers cover edges and corners, which lowers the page's confidence. A
+    # candidate found with the skin cut out (a hand is in view) needs this much less. While skin is next to
+    # the page its stability is judged by how far the page's corners move between frames (pixels): the
+    # picture-difference measure used for a page on the desk cannot tell a 3 px tremor from a real move.
+    hand_confidence_relax: float = Field(0.05, ge=0.0, le=0.3)
+    hand_corner_motion_px: float = Field(10.0, gt=0.0, le=100.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)
 
 

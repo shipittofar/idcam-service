@@ -31,6 +31,18 @@ class DocumentGeometry:
     rectangularity: float
     detection_method: str = "unknown"
     contrast_score: float = 0.0
+    skin_fraction: float = 0.0  # share of the box that is skin-coloured (a hand holding the page)
+
+    @property
+    def rank(self) -> float:
+        """Confidence for choosing between candidates: one that swallowed a hand ranks lower.
+
+        Its own ``confidence`` (what the detection threshold sees) is untouched: a page that is only
+        found together with the hand must still be found.
+        """
+        if _SKIN_PENALTY_FROM < self.skin_fraction < _SKIN_DOCUMENT_ABOVE:
+            return self.confidence * max(0.35, 1.0 - 1.6 * (self.skin_fraction - _SKIN_PENALTY_FROM))
+        return self.confidence
 
 
 @dataclass
@@ -372,6 +384,8 @@ def _score_geometry(
     min_contrast: float,
     edge_maps: tuple[np.ndarray, np.ndarray] | None = None,
     lab: np.ndarray | None = None,
+    skin: np.ndarray | None = None,
+    touch_penalty_vertical: float = 0.7,
 ) -> tuple[DocumentGeometry | None, GeometryCandidateDiag]:
     h, w = int(frame_shape[0]), int(frame_shape[1])
     frame_area = float(w * h)
@@ -434,17 +448,30 @@ def _score_geometry(
     if edge_maps is not None:
         confidence *= _ALIGN_FLOOR + (1.0 - _ALIGN_FLOOR) * min(1.0, _edge_alignment(corners, *edge_maps))
 
+    # How much of the box is skin: a candidate that covers a hand as well is the document AND the fingers
+    # holding it, so its box is wrong and a candidate without the hand should win (see ``rank``). A box
+    # that is mostly skin-coloured is a skin-coloured document and is left alone.
+    skin_fraction = 0.0
+    if skin is not None:
+        sx, sy, sw_, sh_ = clip_roi(bbox, skin.shape)
+        patch = skin[sy : sy + sh_, sx : sx + sw_]
+        if patch.size:
+            skin_fraction = float(np.count_nonzero(patch)) / patch.size
+
     # A region glued to two or more frame borders is the table/background (or a document that
     # is cut off), not a fully visible document: logs showed locks on the whole frame
     # (roi=227,0,1406,1079) with confidence 0.85. Demote it so a real paper candidate wins.
     edge = 1
-    touching = (bx <= edge) + (by <= edge) + (bx + bw >= w - edge) + (by + bh >= h - edge)
+    touching_h = (bx <= edge) + (bx + bw >= w - edge)
+    touching_v = (by <= edge) + (by + bh >= h - edge)
+    touching = touching_h + touching_v
     if touching >= 2:
         confidence *= 0.4
     elif touching == 1:
         # Cut off by one frame edge: the page is not fully in view (logs: regions glued to the top
-        # of the empty desk locked with confidence 0.48-0.52 and then failed focus).
-        confidence *= 0.7
+        # of the empty desk locked with confidence 0.48-0.52 and then failed focus). The view is only
+        # ~1080 px high, so a page flush with the top or bottom edge is common; its penalty is configurable.
+        confidence *= touch_penalty_vertical if touching_v else 0.7
 
     tl, tr, br, bl = corners
     width_top = math.hypot(tr[0] - tl[0], tr[1] - tl[1])
@@ -467,6 +494,7 @@ def _score_geometry(
         rectangularity=float(rectangularity),
         detection_method=method,
         contrast_score=float(contrast),
+        skin_fraction=skin_fraction,
     )
     diag = GeometryCandidateDiag(
         True,
@@ -496,6 +524,8 @@ def _collect_from_mask(
     min_contrast: float,
     edge_maps: tuple[np.ndarray, np.ndarray] | None = None,
     lab: np.ndarray | None = None,
+    skin: np.ndarray | None = None,
+    touch_penalty_vertical: float = 0.7,
 ) -> tuple[list[tuple[DocumentGeometry, GeometryCandidateDiag]], list[GeometryCandidateDiag]]:
     h, w = frame_shape[:2]
     frame_area = float(w * h)
@@ -544,12 +574,38 @@ def _collect_from_mask(
             min_contrast=min_contrast,
             edge_maps=edge_maps,
             lab=lab,
+            skin=skin,
+            touch_penalty_vertical=touch_penalty_vertical,
         )
         reports.append(diag)
         if geom is not None:
             results.append((geom, diag))
 
     return results, reports
+
+
+# Skin: a page held in a hand. Pixels of the hand are cut out of the masks (extra variants), and a
+# candidate that swallowed a hand is demoted. Fractions are of the candidate's box.
+_SKIN_LO = (70, 135, 85)  # YCrCb; the luma floor keeps dark reds (burgundy covers) out
+_SKIN_HI = (255, 180, 135)
+_SKIN_FRAME_MIN = 0.004  # less skin in the frame than this: no hand
+_SKIN_FRAME_MAX = 0.35  # more: the desk itself is skin-coloured (wood), the cue is useless
+_SKIN_PENALTY_FROM = 0.06
+_SKIN_DOCUMENT_ABOVE = 0.6
+_SKIN_BASE_VARIANTS = ("bg_otsu", "bg_otsu_inv", "lab_bg_otsu", "otsu", "otsu_inv")
+
+
+def _skin_mask(work: np.ndarray) -> np.ndarray | None:
+    """Mask of skin-coloured pixels (dilated a little), or None when there is no hand-sized amount of it."""
+    if work.ndim != 3 or work.shape[2] != 3:
+        return None
+    ycc = cv2.cvtColor(work, cv2.COLOR_RGB2YCrCb)
+    mask = cv2.inRange(ycc, _SKIN_LO, _SKIN_HI)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    fraction = float(np.count_nonzero(mask)) / mask.size
+    if not _SKIN_FRAME_MIN < fraction < _SKIN_FRAME_MAX:
+        return None
+    return cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
 
 
 _DETECT_MAX_DIM = 640
@@ -587,6 +643,7 @@ def _rescale_geometry(geom: DocumentGeometry, factor: float, frame_shape: tuple[
         rectangularity=geom.rectangularity,
         detection_method=geom.detection_method,
         contrast_score=geom.contrast_score,
+        skin_fraction=geom.skin_fraction,
     )
 
 
@@ -597,6 +654,7 @@ def _detect_all(
     max_area_fraction: float = 0.90,
     min_rectangularity: float = 0.42,
     min_contrast: float = 0.018,
+    touch_penalty_vertical: float = 0.7,
 ) -> tuple[DocumentGeometry | None, list[GeometryCandidateDiag], str | None]:
     if frame is None or frame.size == 0:
         return None, [], "empty_frame"
@@ -632,7 +690,14 @@ def _detect_all(
     all_geoms: list[DocumentGeometry] = []
     all_reports: list[GeometryCandidateDiag] = []
 
-    for method, mask in _binary_variants(gray, scale, lab):
+    variants = _binary_variants(gray, scale, lab)
+    skin = _skin_mask(work)
+    if skin is not None:
+        not_skin = cv2.bitwise_not(skin)
+        variants = variants + [
+            (name + "_noskin", cv2.bitwise_and(mask, not_skin)) for name, mask in variants if name in _SKIN_BASE_VARIANTS
+        ]
+    for method, mask in variants:
         geoms, reports = _collect_from_mask(
             mask,
             gray,
@@ -644,17 +709,19 @@ def _detect_all(
             min_contrast=min_contrast,
             edge_maps=edge_maps,
             lab=lab,
+            skin=skin,
+            touch_penalty_vertical=touch_penalty_vertical,
         )
         all_reports.extend(reports)
         if geoms:
-            best_local = max((g[0] for g in geoms), key=lambda g: g.confidence)
+            best_local = max((g[0] for g in geoms), key=lambda g: g.rank)
             all_geoms.append(best_local)
 
     if not all_geoms:
         return None, all_reports, "no_contour_passed_filters"
 
     # Deduplicate by bbox IoU — keep highest confidence
-    all_geoms.sort(key=lambda g: g.confidence, reverse=True)
+    all_geoms.sort(key=lambda g: g.rank, reverse=True)
     unique: list[DocumentGeometry] = []
     for geom in all_geoms:
         if all(_bbox_iou(geom.bbox, u.bbox) < 0.55 for u in unique):
@@ -673,6 +740,7 @@ def detect_document_geometry(
     min_rectangularity: float = 0.42,
     min_edge_strength: float = 8.0,  # kept for API compat; contrast path used internally
     min_contrast: float = 0.018,
+    touch_penalty_vertical: float = 0.7,
 ) -> DocumentGeometry | None:
     """Detect document quadrilateral using multi-strategy segmentation."""
     _ = min_edge_strength
@@ -682,6 +750,7 @@ def detect_document_geometry(
         max_area_fraction=max_area_fraction,
         min_rectangularity=min_rectangularity,
         min_contrast=min_contrast,
+        touch_penalty_vertical=touch_penalty_vertical,
     )
     return best
 

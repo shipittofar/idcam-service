@@ -238,6 +238,7 @@ class DocumentDetector:
             frame,
             min_area_fraction=self.config.geometry_min_area_fraction,
             max_area_fraction=self.config.geometry_max_area_fraction,
+            touch_penalty_vertical=self.config.geometry_touch_penalty_vertical,
         )
         self._last_geometry = geom
         self._geometry_frame = frame
@@ -342,6 +343,20 @@ class DocumentDetector:
         patch = self._signature_patch(frame, bbox)  # type: ignore[arg-type]
         return None if patch is None else DocumentSignature(tuple(int(v) for v in bbox), patch)  # type: ignore[arg-type]
 
+    def _present_threshold(self, geom: Any, factor: float = 1.0) -> float:
+        """Confidence a candidate needs; less when it was found with a hand's pixels cut out."""
+        threshold = self.config.min_geometry_confidence * factor
+        if geom is not None and str(getattr(geom, "detection_method", "")).endswith("_noskin"):
+            threshold -= self.config.hand_confidence_relax
+        return threshold
+
+    def current_corners(self, frame: np.ndarray) -> tuple[tuple[int, int], ...] | None:
+        """Outline of the page in ``frame`` (analysed already for this frame in the stability wait), if confident."""
+        geom = self._find_geometry(frame)
+        if geom is None or geom.confidence < self._present_threshold(geom, 0.9):
+            return None
+        return tuple(geom.corners)
+
     @property
     def calm_streak(self) -> int:
         """Consecutive frames that looked like the previous analysed one (0 = the picture just changed)."""
@@ -364,7 +379,7 @@ class DocumentDetector:
         geom = self._find_geometry(frame)  # also advances the calm counter for this frame
         if self._calm_streak < _REPLACE_CALM_FRAMES:
             return False
-        if geom is None or geom.confidence < self.config.min_geometry_confidence:
+        if geom is None or geom.confidence < self._present_threshold(geom):
             return False  # nothing there: the ordinary removal path handles it
         bbox = tuple(geom.bbox)
         if self.config.background_check and self._bg_thumb is not None:
@@ -390,7 +405,7 @@ class DocumentDetector:
         if not self.lock.is_locked:
             return False
         geom = self._find_geometry(frame)
-        if geom is None or geom.confidence < self.config.min_geometry_confidence * 0.9:
+        if geom is None or geom.confidence < self._present_threshold(geom, 0.9):
             return False
         if _bbox_iou(self.lock.roi, tuple(geom.bbox)) >= 0.7:
             return False
@@ -587,7 +602,7 @@ class DocumentDetector:
 
         geom = self._find_geometry(frame)
         if self.lock.is_locked:
-            if geom and geom.confidence >= self.config.min_geometry_confidence * 0.65:
+            if geom and geom.confidence >= self._present_threshold(geom, 0.65):
                 self.lock.update(frame, geom)
                 self._prev_corners = self.lock.corners
             return True
@@ -597,14 +612,14 @@ class DocumentDetector:
             thumb = self._bg_thumbnail(frame)
             if not self._update_background(thumb):
                 background_reason = "learning_background"
-            elif geom and geom.confidence >= self.config.min_geometry_confidence:
+            elif geom and geom.confidence >= self._present_threshold(geom):
                 h, w = frame.shape[:2]
                 if self._is_background(thumb, tuple(geom.bbox), (w, h)):
                     background_reason = "static_background"
         if background_reason:
             geom = None  # nothing new in the picture: not a document (the cached outline stays for reuse)
 
-        if geom and geom.confidence >= self.config.min_geometry_confidence:
+        if geom and geom.confidence >= self._present_threshold(geom):
             same_object = (
                 self._candidate_bbox is None
                 or self.config.detect_min_iou <= 0.0
@@ -649,7 +664,7 @@ class DocumentDetector:
         A small margin under the detection threshold keeps a present page from flickering to empty.
         """
         geom = self._find_geometry(frame)
-        return geom is None or geom.confidence < self.config.min_geometry_confidence * self.config.scene_empty_factor
+        return geom is None or geom.confidence < self._present_threshold(geom, self.config.scene_empty_factor)
 
     def rebaseline_motion(self, frame: np.ndarray) -> None:
         """Re-measure the locked outline on a frame taken after focusing.
