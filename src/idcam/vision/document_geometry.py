@@ -182,8 +182,16 @@ def _binary_variants(
     variants: list[tuple[str, np.ndarray]] = []
 
     def _clean(mask: np.ndarray, kernel: np.ndarray, it: int = 2) -> np.ndarray:
-        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=it)
-        return cv2.morphologyEx(closed, cv2.MORPH_OPEN, k5, iterations=1)
+        # Close and open on a zero-padded mask. Closing grows a shape by (kernel * iterations) and then
+        # erodes it back, but OpenCV treats the frame border as "full" for the erosion: a page lying a few
+        # pixels from the border came out glued to it (bbox starting at x=0), was taken for a page cut off
+        # by the frame and demoted, so documents near the edge were missed. Padding keeps real cut-offs
+        # (the shape still reaches the border) and un-glues the ones that are only close.
+        pad = int(max(kernel.shape) * it + k5.shape[0] + 2)
+        padded = cv2.copyMakeBorder(mask, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+        closed = cv2.morphologyEx(padded, cv2.MORPH_CLOSE, kernel, iterations=it)
+        opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, k5, iterations=1)
+        return opened[pad:-pad, pad:-pad]
 
     for block in (21, 35, 51):
         block = _odd(block * scale, 7)
@@ -429,7 +437,7 @@ def _score_geometry(
     # A region glued to two or more frame borders is the table/background (or a document that
     # is cut off), not a fully visible document: logs showed locks on the whole frame
     # (roi=227,0,1406,1079) with confidence 0.85. Demote it so a real paper candidate wins.
-    edge = 3
+    edge = 1
     touching = (bx <= edge) + (by <= edge) + (bx + bw >= w - edge) + (by + bh >= h - edge)
     if touching >= 2:
         confidence *= 0.4

@@ -197,3 +197,32 @@ class TestIdCardSizedDocuments:
 
     def test_the_default_minimum_area_admits_an_id_card(self):
         assert DetectionConfig().geometry_min_area_fraction <= 0.012
+
+
+class TestDocumentCloseToTheFrameBorder:
+    """Closing grew a page lying a few pixels from the border until it touched it; it was then taken for a
+    page cut off by the frame and demoted (bbox x=0, confidence 0.44 instead of 0.62)."""
+
+    @pytest.mark.parametrize("desk,color", [("dark", (190, 150, 90)), ("wood", WHITE_PAGE)])
+    @pytest.mark.parametrize("gap", [6, 8, 12, 25])
+    @pytest.mark.parametrize("side", ["left", "right", "top", "bottom"])
+    def test_a_page_fully_in_view_near_the_border_is_detected(self, desk, color, gap, side):
+        w, h = 360, 227
+        cx, cy = {
+            "left": (gap + w // 2, 540),
+            "right": (1920 - gap - w // 2, 540),
+            "top": (960, gap + h // 2),
+            "bottom": (960, 1080 - gap - h // 2),
+        }[side]
+        img, truth = _card_scene(desk, color, w, cx, cy, angle=0.0)
+        geom = _detect(img)
+        assert geom is not None, (side, gap)
+        assert geom.confidence >= DetectionConfig().min_geometry_confidence, (side, gap, geom.confidence)
+        assert dg._bbox_iou(truth, geom.bbox) >= 0.8
+
+    @pytest.mark.parametrize("cut", [0.10, 0.25])
+    def test_a_page_really_cut_off_by_the_frame_is_still_demoted(self, cut):
+        w = 360
+        img, _ = _card_scene("dark", (190, 150, 90), w, int(w / 2 - cut * w) + 4, 540, angle=0.0)
+        geom = _detect(img)
+        assert geom is None or geom.confidence < DetectionConfig().min_geometry_confidence
