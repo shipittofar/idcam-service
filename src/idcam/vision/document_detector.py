@@ -47,6 +47,36 @@ class DocumentPresence(str, Enum):
     DOCUMENT_READY = "document_ready"
 
 
+_ASCII_RAMP = " .:-=+*#%@"
+
+
+def ascii_snapshot(frame: np.ndarray, quad: Any = None, cols: int = 64) -> tuple[str, str]:
+    """Two small text renderings of a frame, for a log line (rows joined by '|').
+
+    ``gray``: brightness as characters, the detected outline drawn with 'Q'. ``cr``: the red chroma channel
+    as digits 0-9 (skin and other warm colours are high, 4-9), so a hand shows up whatever the skin
+    classifier thinks. For judging a detection from a log when no image can be sent.
+    """
+    h, w = frame.shape[:2]
+    rows = max(8, int(round(cols * h / max(w, 1) * 0.5)))  # characters are about twice as tall as wide
+    small = cv2.resize(frame, (cols, rows), interpolation=cv2.INTER_AREA)
+    gray = to_gray(small)
+    grid = [[_ASCII_RAMP[min(9, int(v) * 10 // 256)] for v in row] for row in gray]
+    if quad is not None and len(quad) == 4:
+        pts = [(x * cols / max(w, 1), y * rows / max(h, 1)) for x, y in quad]
+        for i in range(4):
+            (x0, y0), (x1, y1) = pts[i], pts[(i + 1) % 4]
+            steps = int(max(abs(x1 - x0), abs(y1 - y0), 1)) * 2
+            for t in range(steps + 1):
+                x = int(round(x0 + (x1 - x0) * t / steps))
+                y = int(round(y0 + (y1 - y0) * t / steps))
+                if 0 <= x < cols and 0 <= y < rows:
+                    grid[y][x] = "Q"
+    cr = cv2.cvtColor(small, cv2.COLOR_RGB2YCrCb)[..., 1].astype(np.int16) if small.ndim == 3 else np.zeros_like(gray)
+    digits = np.clip((cr - 100) // 8, 0, 9)
+    return "|".join("".join(r) for r in grid), "|".join("".join(str(int(d)) for d in row) for row in digits)
+
+
 @dataclass(frozen=True)
 class DocumentSignature:
     """What a captured document looked like: its box and a small grey patch of that area."""

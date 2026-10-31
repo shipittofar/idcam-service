@@ -48,7 +48,7 @@ from idcam.system.component_health import ComponentStatus, HealthLevel, SystemHe
 from idcam.system.watchdog import Watchdog
 from idcam.ui.led import LedIndicator
 from idcam.ui.status import StatusPublisher
-from idcam.vision.document_detector import DocumentDetector
+from idcam.vision.document_detector import DocumentDetector, ascii_snapshot
 from idcam.vision.sharpness import scale_preview_roi_to_image
 from idcam.vision.stability_detector import StabilityDetector
 
@@ -148,6 +148,8 @@ class ApplicationOrchestrator:
         # What the document of the current/last capture looked like, to notice that the next person
         # put a different one in its place without the scene ever being empty.
         self._doc_signature = None
+        # IDCAM_ASCII_DEBUG=1: each detection also logs two small text pictures of the frame (see ascii_snapshot)
+        self._ascii_debug = os.environ.get("IDCAM_ASCII_DEBUG", "").lower() in ("1", "true")
         self._removal_disturbance = 0  # frames in which the picture changed while waiting for the next document
         self._background: set[asyncio.Task] = set()
         self._last_scene_empty = False
@@ -493,6 +495,13 @@ class ApplicationOrchestrator:
                 self.detector.detection_latency_ms,
                 getattr(self.detector._last_geometry, "alternatives", ()),
             )
+            if self._ascii_debug:
+                try:
+                    geom = self.detector._last_geometry
+                    gray_map, cr_map = ascii_snapshot(frame, getattr(geom, "corners", None))
+                    logger.info("event=ascii_snapshot cols=64 gray=%s cr=%s", gray_map, cr_map)
+                except Exception:
+                    logger.warning("event=ascii_snapshot_failed", exc_info=True)
             logger.info("event=pipeline_stage stage=document_detected")
             self.stability.reset()
             self._begin_transaction(trigger="auto")

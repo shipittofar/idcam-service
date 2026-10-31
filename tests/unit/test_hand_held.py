@@ -297,3 +297,23 @@ class TestDiagnosticsAndFill:
         clean = dg.DocumentGeometry(quad_fill=0.98, **base)
         bitten = dg.DocumentGeometry(quad_fill=0.7, **base)
         assert bitten.confidence == clean.confidence and bitten.rank < clean.rank
+
+
+class TestAsciiSnapshot:
+    def test_two_readable_maps_with_the_outline_and_the_warm_colours(self):
+        from idcam.vision.document_detector import ascii_snapshot
+
+        img, _ = _card("dark", NAVY, "thumb_corner")
+        geom = _detect(img)
+        gray, cr = ascii_snapshot(img, geom.corners)
+        gray_rows, cr_rows = gray.split("|"), cr.split("|")
+        assert len(gray_rows) == len(cr_rows) >= 8 and all(len(r) == 64 for r in gray_rows + cr_rows)
+        assert "Q" in gray  # the detected outline
+        assert any(ch in "789" for ch in cr)  # the hand is warm: high red chroma
+        assert set(cr) <= set("0123456789|")
+
+    def test_a_frame_without_an_outline_still_renders(self):
+        from idcam.vision.document_detector import ascii_snapshot
+
+        gray, cr = ascii_snapshot(np.full((120, 160, 3), 128, np.uint8))
+        assert "Q" not in gray and len(gray.split("|")) == len(cr.split("|"))
