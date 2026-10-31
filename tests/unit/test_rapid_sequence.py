@@ -267,13 +267,14 @@ class TestSwapRobustness:
         det = DocumentDetector(cfg)
         scene = _doc()
         for _ in range(12):
-            det.detect(scene.copy())  # learns the background
+            det.detect(_empty())  # learns the empty desk as the background
         assert det._bg_thumb is not None
-        sig = det.document_signature(scene)
+        sig = det.document_signature(scene)  # a document that was captured earlier
         moved = _doc(margin_x=200, margin_y=150)
         det._is_background = lambda *a, **k: True  # whatever stands there still looks like the learned background
         assert not any(det.document_replaced(moved.copy(), sig) for _ in range(12))
         det._is_background = lambda *a, **k: False
+        det._gate_small = None  # the scene is analysed afresh (the gate would reuse the empty answer)
         assert any(det.document_replaced(moved.copy(), sig) for _ in range(12))
 
     @pytest.mark.asyncio
@@ -331,7 +332,9 @@ class TestRemovalUsesTheLearnedBackground:
 
     def test_a_confident_outline_that_is_only_the_background_counts_as_empty(self):
         det, furniture = self._learned()
-        assert det._find_geometry(furniture.copy()).confidence > 0.5  # without the background it is a "document"
+        from idcam.vision import document_geometry as dg
+
+        assert dg.detect_document_geometry(furniture.copy()).confidence > 0.5  # without the background it is a "document"
         assert det.is_scene_empty(furniture.copy()) is True
 
     def test_the_same_picture_with_a_new_document_is_not_empty(self):

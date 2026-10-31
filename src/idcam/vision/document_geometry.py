@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -560,6 +561,7 @@ def _collect_from_mask(
     lab: np.ndarray | None = None,
     skin: np.ndarray | None = None,
     touch_penalty_vertical: float = 0.7,
+    reject: Callable[[tuple[int, int, int, int], tuple[int, int]], bool] | None = None,
 ) -> tuple[list[tuple[DocumentGeometry, GeometryCandidateDiag]], list[GeometryCandidateDiag]]:
     h, w = frame_shape[:2]
     frame_area = float(w * h)
@@ -613,6 +615,10 @@ def _collect_from_mask(
         )
         reports.append(diag)
         if geom is not None:
+            if reject is not None and reject(tuple(geom.bbox), (w, h)):
+                diag.accepted = False
+                diag.rejection_reason = "static_background"
+                continue
             results.append((geom, diag))
 
     return results, reports
@@ -630,7 +636,8 @@ _SKIN_MAX_SATURATION = 165  # HSV S (0..255): more saturated than any skin
 _SKIN_HSV_LO = (0, 45, 40)
 _SKIN_HSV_HI = (22, 190, 255)
 _SKIN_FRAME_MIN = 0.004  # less skin in the frame than this: no hand
-_SKIN_FRAME_MAX = 0.35  # more: the desk itself is skin-coloured (wood), the cue is useless
+_SKIN_FRAME_MAX = 0.55  # more: the desk itself is skin-coloured (wood), the cue is useless
+_SKIN_RESTRICT_ABOVE = 0.25  # a raw skin share above this is limited to pixels that are new vs the empty scene
 _SKIN_PENALTY_FROM = 0.06
 _SKIN_DOCUMENT_ABOVE = 0.6
 _SKIN_CLEAN_FILL = 0.88  # a skin-coloured box that fills its quadrilateral this well is a page, not a hand
@@ -661,7 +668,7 @@ def _skin_mask(work: np.ndarray, change: np.ndarray | None = None) -> tuple[np.n
     raw = cv2.morphologyEx(skin_pixels(work), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     raw_fraction = float(np.count_nonzero(raw)) / raw.size
     mask, fraction = raw, raw_fraction
-    if raw_fraction >= _SKIN_FRAME_MAX and change is not None:
+    if raw_fraction >= _SKIN_RESTRICT_ABOVE and change is not None:
         if change.shape[:2] != raw.shape[:2]:
             change = cv2.resize(change, (raw.shape[1], raw.shape[0]), interpolation=cv2.INTER_NEAREST)
         mask = cv2.bitwise_and(raw, change)
@@ -724,6 +731,8 @@ def _detect_all(
     min_contrast: float = 0.018,
     touch_penalty_vertical: float = 0.7,
     change_mask: np.ndarray | None = None,
+    extra_masks: list[tuple[str, np.ndarray]] | None = None,
+    reject: Callable[[tuple[int, int, int, int], tuple[int, int]], bool] | None = None,
 ) -> tuple[DocumentGeometry | None, list[GeometryCandidateDiag], str | None]:
     if frame is None or frame.size == 0:
         return None, [], "empty_frame"
@@ -761,10 +770,18 @@ def _detect_all(
 
     variants = _binary_variants(gray, scale, lab)
     skin, skin_frame, skin_raw = _skin_mask(work, change_mask)
+    # Masks the caller built from knowledge the frame alone does not have (e.g. "differs from the learned empty
+    # desk"): they do not depend on edges or local contrast, so they find a page that is blurred or dim.
+    for name, extra in extra_masks or []:
+        if extra.shape[:2] != gray.shape[:2]:
+            extra = cv2.resize(extra, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
+        variants.append((name, extra))
     if skin is not None:
         not_skin = cv2.bitwise_not(skin)
         variants = variants + [
-            (name + "_noskin", cv2.bitwise_and(mask, not_skin)) for name, mask in variants if name in _SKIN_BASE_VARIANTS
+            (name + "_noskin", cv2.bitwise_and(mask, not_skin))
+            for name, mask in variants
+            if name in _SKIN_BASE_VARIANTS or name.startswith("bgdiff")
         ]
     for method, mask in variants:
         geoms, reports = _collect_from_mask(
@@ -780,6 +797,7 @@ def _detect_all(
             lab=lab,
             skin=skin,
             touch_penalty_vertical=touch_penalty_vertical,
+            reject=reject,
         )
         all_reports.extend(reports)
         if geoms:
@@ -841,6 +859,8 @@ def detect_document_geometry(
     min_contrast: float = 0.018,
     touch_penalty_vertical: float = 0.7,
     change_mask: np.ndarray | None = None,
+    extra_masks: list[tuple[str, np.ndarray]] | None = None,
+    reject: Callable[[tuple[int, int, int, int], tuple[int, int]], bool] | None = None,
 ) -> DocumentGeometry | None:
     """Detect document quadrilateral using multi-strategy segmentation.
 
@@ -856,6 +876,8 @@ def detect_document_geometry(
         min_contrast=min_contrast,
         touch_penalty_vertical=touch_penalty_vertical,
         change_mask=change_mask,
+        extra_masks=extra_masks,
+        reject=reject,
     )
     return best
 

@@ -207,7 +207,7 @@ class DetectionConfig(BaseModel):
     edge_zone_relax: float = Field(0.08, ge=0.0, le=0.3)
     # A winning outline that includes a hand is believed only after this many times the usual frames
     # (the outline without the hand normally takes its place meanwhile). 1 = no extra patience.
-    hand_detect_patience: int = Field(4, ge=1, le=20)
+    hand_detect_patience: int = Field(2, ge=1, le=20)
     hand_corner_motion_px: float = Field(10.0, gt=0.0, le=100.0)
     baseline_alpha: float = Field(0.05, gt=0, le=1.0)
 

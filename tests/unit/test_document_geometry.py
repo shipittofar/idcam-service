@@ -501,7 +501,8 @@ class TestEmptySceneBackground:
         det = DocumentDetector(self._cfg())
         results = [det.detect(self._furniture().copy()) for _ in range(40)]
         assert not any(results)
-        assert det._last_reject_reason == "static_background"
+        # the furniture is dropped inside the candidate search now, so nothing is left to reject afterwards
+        assert det._last_reject_reason in {"static_background", "no_document_geometry"}
 
     def test_a_document_placed_on_the_learned_desk_is_detected(self):
         det = DocumentDetector(self._cfg())

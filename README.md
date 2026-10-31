@@ -170,6 +170,10 @@ A page held in the fingers is found with the hand cut out: when a hand-sized amo
 
 `detection.geometry_touch_penalty_vertical` (default 0.8) eases the penalty for a page touching the top or bottom edge of the frame; with `background_check` a value up to 0.9 is safe.
 
+## Pages in corners, at the edges, or held in a hand
+
+With `detection.background_check: true` the detector also segments by *what is new against the learned empty desk* (`bgdiff` in the log): it needs no edges and no local contrast, so a page that is blurred, dim or in a vignetted corner is found as plainly as one in the middle, and a held page is found by cutting the warm pixels of the hand out of that mask (`bgdiff_noskin`). Candidates that are only the learned background are dropped inside the candidate search, so a static object that scores higher can no longer hide the page. The static-scene gate counts the few thumbnail pixels a dim page changes instead of averaging them away. The background is refreshed only while the picture is still close to it (a page or hand lying there undetected is never learned); a picture that stays different for ~100 s is taken for the new normal (the light changed). Without `background_check` these paths are off.
+
 ## False detections (something always in view)
 
 `detection.background_check: true` makes the detector learn what the empty scene looks like (the first ~2 s after a start, once the picture is calm) and ignore a "document" whose area still looks like that background: furniture, a mat, cables, shadows that are always there. The idle log line shows `reason=static_background` for those. It keeps refreshing the background while nothing is detected (follows slow light changes). Limits: a document already lying there when the service starts counts as background until it is taken away and put back; a very large always-present object can hide a small document placed on it; if the picture never gets calm the check is skipped (`background_check_skipped`). Together with `detect_min_iou` (the same outline in consecutive frames) and `min_geometry_confidence`. Off by default.

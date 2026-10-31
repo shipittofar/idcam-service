@@ -24,11 +24,14 @@ logger = get_logger("vision.document_detector")
 # idle loop, the stability wait and the pre-capture check all ask for the geometry of a scene that
 # has not changed. A frame that matches the last analysed one on a tiny thumbnail reuses its result.
 _GATE_SIZE = (96, 54)
-_GATE_MEAN_DIFF = 0.8  # grey levels, averaged over the thumbnail
-_GATE_PIXEL_DIFF = 10  # a thumbnail pixel that changed by more than this ...
-_GATE_MAX_CHANGED = 2  # ... may occur at most this often
+_GATE_PIXEL_DIFF = 5  # a thumbnail pixel that changed by more than this (grey levels, after the global shift) ...
+_GATE_MAX_CHANGED = 3  # ... may occur at most this often
 _GATE_MAX_REUSE = 8  # consecutive reuses before the frame is analysed again anyway
 _BG_THUMB = (160, 90)  # colour thumbnail used to learn / compare the empty background
+_BG_WORK_WIDTH = 640  # the empty background is also kept at this width, for the difference mask
+_BG_DIFF_THRESHOLD = 18.0  # colour difference (0..255, after removing a global exposure shift) that counts as "new"
+_BG_DIFF_MIN_FRACTION = 0.004  # a difference mask covering less of the frame than this is noise
+_BG_STALE_FRAMES = 600  # calm frames with something different on the desk after which it is taken for the new normal
 _SIG_SIZE = (64, 48)  # grey patch of a captured document, to recognise a different one in its place
 _REPLACE_CALM_FRAMES = 5  # the picture must have been still this long before "replaced" is believed
 _REPLACE_MIN_IOU = 0.5  # a new outline overlapping the old one less than this is another document
@@ -165,6 +168,8 @@ class DocumentDetector:
         self._candidate_bbox: tuple[int, int, int, int] | None = None
         # Empty-scene background (see DetectionConfig.background_check)
         self._bg_thumb: np.ndarray | None = None
+        self._bg_work: np.ndarray | None = None
+        self._bg_stale = 0
         self._calm_streak = 0  # consecutive frames that look like the previous analysed one
         self._bg_frames_seen = 0
         self._bg_given_up = False
@@ -202,8 +207,11 @@ class DocumentDetector:
         previous = self._gate_small
         similar = False
         if previous is not None:
-            diff = cv2.absdiff(small, previous)
-            similar = float(diff.mean()) < _GATE_MEAN_DIFF and int(np.count_nonzero(diff > _GATE_PIXEL_DIFF)) <= _GATE_MAX_CHANGED
+            # After removing the global shift (auto exposure): a dim page in a vignetted corner changes only a
+            # few thumbnail pixels by a few levels, so the test counts those instead of averaging them away.
+            diff = small.astype(np.int16) - previous.astype(np.int16)
+            diff -= int(np.median(diff))
+            similar = int(np.count_nonzero(np.abs(diff) > _GATE_PIXEL_DIFF)) <= _GATE_MAX_CHANGED
         self._calm_streak = self._calm_streak + 1 if similar else 0
         if similar and self._gate_reuse < _GATE_MAX_REUSE:
             return True
@@ -217,7 +225,13 @@ class DocumentDetector:
     def _bg_thumbnail(frame: np.ndarray) -> np.ndarray:
         return cv2.resize(frame, _BG_THUMB, interpolation=cv2.INTER_AREA).astype(np.float32)
 
-    def _update_background(self, thumb: np.ndarray) -> bool:
+    @staticmethod
+    def _work_image(frame: np.ndarray) -> np.ndarray:
+        h, w = frame.shape[:2]
+        size = (_BG_WORK_WIDTH, max(8, int(round(_BG_WORK_WIDTH * h / max(w, 1)))))
+        return cv2.resize(frame, size, interpolation=cv2.INTER_AREA).astype(np.float32)
+
+    def _update_background(self, thumb: np.ndarray, frame: np.ndarray | None = None) -> bool:
         """Learn / refresh the empty background. False while it is still being learned at start."""
         cfg = self.config
         if self._bg_given_up:
@@ -226,6 +240,7 @@ class DocumentDetector:
         if self._bg_thumb is None:
             if self._calm_streak >= cfg.background_warmup_frames:
                 self._bg_thumb = thumb
+                self._bg_work = self._work_image(frame) if frame is not None else None
                 logger.info("event=background_learned frames_seen=%d", self._bg_frames_seen)
                 return True
             if self._bg_frames_seen >= cfg.background_give_up_frames:
@@ -233,8 +248,17 @@ class DocumentDetector:
                 logger.warning("event=background_check_skipped reason=scene_never_calm")
                 return True
             return False
-        if not self.is_latched and self._calm_streak and self._calm_streak % cfg.background_refresh_frames == 0:
-            self._bg_thumb = thumb  # follow slow light changes while nothing is detected
+        if not self.is_latched and self._calm_streak:
+            # Follow slow light changes while nothing is detected, but never learn a page (or a hand) that
+            # simply lies there undetected: only a picture close to the learned desk refreshes it. A picture
+            # that stays different for a very long time is taken for the new normal (the light changed).
+            if self._calm_streak % cfg.background_refresh_frames == 0:
+                close = self._looks_like_background(thumb, 0.01)
+                self._bg_stale = 0 if close else self._bg_stale + cfg.background_refresh_frames
+                if close or self._bg_stale >= _BG_STALE_FRAMES:
+                    self._bg_thumb = thumb
+                    self._bg_work = self._work_image(frame) if frame is not None else self._bg_work
+                    self._bg_stale = 0
         return True
 
     def _is_background(self, thumb: np.ndarray, bbox: tuple[int, int, int, int], frame_size: tuple[int, int]) -> bool:
@@ -270,6 +294,8 @@ class DocumentDetector:
             max_area_fraction=self.config.geometry_max_area_fraction,
             touch_penalty_vertical=self.config.geometry_touch_penalty_vertical,
             change_mask=self._change_mask(frame),
+            extra_masks=self._extra_masks(frame),
+            reject=self._background_rejecter(frame),
         )
         self._last_geometry = geom
         self._geometry_frame = frame
@@ -668,7 +694,7 @@ class DocumentDetector:
         background_reason = ""
         if self.config.background_check:
             thumb = self._bg_thumbnail(frame)
-            if not self._update_background(thumb):
+            if not self._update_background(thumb, frame):
                 background_reason = "learning_background"
             elif geom and geom.confidence >= self._present_threshold(geom):
                 h, w = frame.shape[:2]
@@ -739,6 +765,23 @@ class DocumentDetector:
                 return True
         return False
 
+    def _background_rejecter(self, frame: np.ndarray) -> Any:
+        """Callable (bbox, frame size) -> True for a candidate that is just the learned empty scene.
+
+        It runs inside the candidate search: a static object that scores higher than the page (furniture,
+        a vignetted corner) must not hide the page, which a check on the winner alone cannot prevent.
+        """
+        if not self.config.background_check or self._bg_thumb is None:
+            return None
+        thumb = self._bg_thumbnail(frame)
+        if thumb.shape != self._bg_thumb.shape:
+            return None
+        return lambda bbox, size: self._is_background(thumb, bbox, size)
+
+    def _extra_masks(self, frame: np.ndarray) -> list[tuple[str, np.ndarray]] | None:
+        mask = self._difference_mask(frame)
+        return None if mask is None else [("bgdiff", mask)]
+
     def _change_mask(self, frame: np.ndarray) -> np.ndarray | None:
         """Where the picture differs from the learned empty scene (small mask; None while not learned)."""
         if not self.config.background_check or self._bg_thumb is None:
@@ -751,14 +794,39 @@ class DocumentDetector:
         changed = (np.abs(diff - offset).max(axis=2) > 14.0).astype(np.uint8) * 255
         return cv2.dilate(changed, np.ones((3, 3), np.uint8))
 
-    def _looks_like_background(self, thumb: np.ndarray) -> bool:
-        """The whole picture matches the learned empty scene (after removing a global exposure shift)."""
+    def _looks_like_background(self, thumb: np.ndarray, max_changed: float = 0.003) -> bool:
+        """The whole picture matches the learned empty scene (after removing a global exposure shift).
+
+        Counts the pixels that differ, not their average: a small ID card on a large desk changes only
+        ~1-2 % of the picture, which an average would call "the same desk".
+        """
         base = self._bg_thumb
         if base is None or base.shape != thumb.shape:
             return False
         diff = thumb - base
         offset = np.median(diff.reshape(-1, diff.shape[-1]), axis=0)
-        return float(np.abs(diff - offset).mean()) < 0.5 * self.config.background_min_diff
+        changed = np.abs(diff - offset).max(axis=2) > 22.0
+        return float(np.count_nonzero(changed)) / changed.size < max_changed
+
+    def _difference_mask(self, frame: np.ndarray) -> np.ndarray | None:
+        """What is NEW against the learned empty desk, as a clean mask at working size (None = nothing new).
+
+        It needs no edges, no local contrast and no colour model, so a page that is blurred, dim or in a
+        vignetted corner shows up as plainly as one in the middle; whatever is warm (a hand) is cut out
+        by the geometry step.
+        """
+        if not self.config.background_check or self._bg_work is None:
+            return None
+        cur = self._work_image(frame)
+        if cur.shape != self._bg_work.shape:
+            return None
+        diff = cur - self._bg_work
+        offset = np.median(diff.reshape(-1, diff.shape[-1]), axis=0)  # global exposure / white balance shift
+        new = (np.abs(diff - offset).max(axis=2) > _BG_DIFF_THRESHOLD).astype(np.uint8) * 255
+        new = cv2.morphologyEx(new, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        if np.count_nonzero(new) < _BG_DIFF_MIN_FRACTION * new.size:
+            return None
+        return cv2.morphologyEx(new, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
 
     def rebaseline_motion(self, frame: np.ndarray) -> None:
         """Re-measure the locked outline on a frame taken after focusing.
