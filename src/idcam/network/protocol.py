@@ -8,6 +8,26 @@ from enum import Enum
 from idcam.exceptions import ProtocolError
 
 
+_STATUS_OK = frozenset({"success", "succeeded", "ok", "accepted", "done", "true"})
+_STATUS_FAIL = frozenset({"fail", "failed", "failure", "error", "rejected", "false"})
+
+
+def _verdict(body: dict) -> bool | None:
+    """The server's own verdict: ``success`` (bool) or ``status`` ("success" / "fail"); None = it gave none."""
+    if "success" in body:
+        return bool(body["success"])
+    status = body.get("status")
+    if isinstance(status, bool):
+        return status
+    if isinstance(status, str):
+        word = status.strip().lower()
+        if word in _STATUS_OK:
+            return True
+        if word in _STATUS_FAIL:
+            return False
+    return None
+
+
 class UploadOutcome(str, Enum):
     NEVER_SENT = "never_sent"
     SENT_UNKNOWN = "sent_unknown"
@@ -71,9 +91,8 @@ class ServerResponse:
                 f"Response capture_id mismatch: expected={expected_capture_id} got={response_capture_id}"
             )
 
-        success = bool(body.get("success", 200 <= status < 300))
-        if 200 <= status < 300 and "success" not in body:
-            success = True
+        verdict = _verdict(body)
+        success = verdict if verdict is not None else 200 <= status < 300
 
         outcome = UploadOutcome.ACCEPTED if success and 200 <= status < 300 else UploadOutcome.REJECTED
         if status >= 500:
@@ -91,8 +110,8 @@ class ServerResponse:
     @classmethod
     def validate_json_body(cls, body: dict, expected_capture_id: str) -> None:
         """Validate business response structure."""
-        if "success" not in body:
-            raise ProtocolError("Response missing required field: success")
+        if _verdict(body) is None and "success" not in body:
+            raise ProtocolError("Response missing required field: success (or status: success/fail)")
         if body.get("capture_id") and body["capture_id"] != expected_capture_id:
             raise ProtocolError(
                 f"Response capture_id mismatch: expected={expected_capture_id} got={body['capture_id']}"

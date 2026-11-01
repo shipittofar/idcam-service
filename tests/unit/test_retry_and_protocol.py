@@ -59,3 +59,27 @@ class TestServerResponse:
     def test_validate_json_body_mismatch(self):
         with pytest.raises(ProtocolError):
             ServerResponse.validate_json_body({"success": True, "capture_id": "x"}, "y")
+
+
+class TestServerStatusField:
+    """The OCR server answers {"status": "success" | "fail", "error": ...} with HTTP 200."""
+
+    def test_status_success_is_accepted(self):
+        resp = ServerResponse.from_http(200, {"status": "success", "doc_type": "id_card"}, "c1")
+        assert resp.success and resp.outcome == UploadOutcome.ACCEPTED
+
+    def test_status_fail_with_http_200_is_not_accepted_and_carries_the_servers_reason(self):
+        body = {"status": "fail", "error": "No trained model for 'boarding_pass'. Train first."}
+        resp = ServerResponse.from_http(200, body, "c1")
+        assert not resp.success and resp.outcome == UploadOutcome.REJECTED
+        assert "No trained model" in resp.message
+
+    def test_a_body_with_status_passes_validation(self):
+        ServerResponse.validate_json_body({"status": "fail"}, "c1")
+
+    def test_a_body_with_neither_status_nor_success_is_still_a_protocol_error(self):
+        with pytest.raises(ProtocolError):
+            ServerResponse.validate_json_body({"file": {"saved": "x.jpg"}}, "c1")
+
+    def test_success_key_still_wins(self):
+        assert ServerResponse.from_http(200, {"success": False, "status": "success"}, "c1").success is False
