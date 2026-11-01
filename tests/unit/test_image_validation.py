@@ -142,6 +142,24 @@ class TestDocumentJudgedByDocumentSharpness:
             )
 
 
+    def test_brightness_is_the_pages_not_the_dark_desks(self, tmp_path):
+        path = tmp_path / "bright_doc.jpg"
+        TestLargeStillValidation._page(path)
+        kw = dict(min_file_bytes=1000, min_sharpness=1.0, min_document_sharpness=1.0)
+        overall = ImageValidator(QualityConfig(**kw)).validate(path).brightness
+        page = ImageValidator(QualityConfig(**kw)).validate(
+            path, document_roi=self.DOC, preview_size=self.PREVIEW, scaler_crop=self.CROP
+        ).brightness
+        assert page != pytest.approx(overall, abs=0.5)
+        cut = (page + overall) / 2
+        if page > overall:  # a bright page on a dark desk: only the page's brightness counts
+            ImageValidator(QualityConfig(min_brightness=cut, **kw)).validate(
+                path, document_roi=self.DOC, preview_size=self.PREVIEW, scaler_crop=self.CROP
+            )
+            with pytest.raises(ImageValidationError, match="too dark"):
+                ImageValidator(QualityConfig(min_brightness=cut, **kw)).validate(path)
+
+
 class TestMinimumFileSizeScalesWithTheImage:
     @staticmethod
     def _jpeg(tmp_path, size, quality, noise=0):

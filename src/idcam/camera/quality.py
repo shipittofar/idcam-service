@@ -145,6 +145,11 @@ class ImageValidator:
                 rx, ry, rw, rh = still_doc_roi
                 roi_for_frame = (rx // reduce, ry // reduce, max(1, rw // reduce), max(1, rh // reduce))
             document_sharpness = still_sharpness(frame, roi=roi_for_frame)
+            # The page is what has to be readable. On a dark desk the whole-frame mean is far below the page's
+            # own brightness and rejected perfectly exposed images as "too dark".
+            bx, by, bw, bh = clip_roi(roi_for_frame, frame.shape)
+            if bw >= 16 and bh >= 16:
+                brightness = mean_brightness(frame[by : by + bh, bx : bx + bw])
 
         # Diagnostic only: same metric and pixel scale as the autofocus check (the preview covers
         # the sensor at 1/4 size, and so does this decode). A ratio near 1 with a failing absolute
