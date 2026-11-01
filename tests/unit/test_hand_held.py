@@ -152,7 +152,7 @@ class TestStabilityWithAHand:
     def test_without_a_hand_the_corners_are_ignored_and_the_picture_decides(self):
         rng = np.random.default_rng(3)
         img, box = _card("dark", WHITE, None)
-        sd = StabilityDetector(DetectionConfig())
+        sd = StabilityDetector(DetectionConfig(stability_sensitivity=1.0))
         sd.set_roi(box)
         for _ in range(10):
             dx, dy = rng.integers(-5, 6, 2)
