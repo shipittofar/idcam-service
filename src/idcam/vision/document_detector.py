@@ -35,6 +35,7 @@ _BG_STALE_FRAMES = 600  # calm frames with something different on the desk after
 _SIG_SIZE = (64, 48)  # grey patch of a captured document, to recognise a different one in its place
 _REPLACE_CALM_FRAMES = 5  # the picture must have been still this long before "replaced" is believed
 _REPLACE_MIN_IOU = 0.5  # a new outline overlapping the old one less than this is another document
+_STILL_THERE_NCC = 0.85  # the captured page's area correlates this well with itself: it has not been taken away
 _REPLACE_MIN_NCC = 0.8  # correlation of the old document's area with itself now; lower = different content
 # After the picture was disturbed (a hand took the document away) the same page rarely comes back looking
 # identical, but two cards of the same template do look alike: then a smaller change is enough.
@@ -488,6 +489,25 @@ class DocumentDetector:
         if denom < 1e-6:
             return False  # a flat area carries no content to compare
         return float((a * b).sum()) / denom < min_ncc
+
+    def document_still_there(self, frame: np.ndarray, signature: DocumentSignature | None) -> bool:
+        """True when the area of the captured document still shows (nearly) the same picture.
+
+        A direct look at the page's own pixels: it does not depend on edge scores, so a page that is dim,
+        blurred or in a corner is not mistaken for "gone", and once the page is lifted the area turns into
+        bare desk, the correlation collapses at the very next frame.
+        """
+        if signature is None:
+            return False
+        now = self._signature_patch(frame, signature.bbox)
+        if now is None or now.shape != signature.patch.shape:
+            return False
+        a = signature.patch - float(signature.patch.mean())
+        b = now - float(now.mean())
+        denom = float(np.sqrt((a * a).sum() * (b * b).sum()))
+        if denom < 1e-6:
+            return False
+        return float((a * b).sum()) / denom >= _STILL_THERE_NCC
 
     def refresh_lock(self, frame: np.ndarray) -> bool:
         """Re-lock when the outline in view no longer matches the lock (the page was swapped or moved)."""

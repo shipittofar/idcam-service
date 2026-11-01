@@ -1234,6 +1234,8 @@ class ApplicationOrchestrator:
             self._transition(AppState.DOCUMENT_DETECTED, reason="manual_capture")
             return
         empty = self.detector.is_scene_empty(frame)
+        if empty and self.detector.document_still_there(frame, self._doc_signature):
+            empty = False  # the edge score fell (dim corner, blur) but the page's own pixels are unchanged
         self._last_scene_empty = empty
         if self.detector.calm_streak == 0:
             self._removal_disturbance += 1

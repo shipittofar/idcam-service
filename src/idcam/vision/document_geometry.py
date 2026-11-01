@@ -369,12 +369,63 @@ def _edge_alignment(corners: tuple[tuple[int, int], ...], grad_near: np.ndarray,
     return on_edge / peak if peak > 1e-6 else 0.0
 
 
+def _line_through(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    vx, vy, x0, y0 = cv2.fitLine(points.astype(np.float32), cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
+    return np.array([x0, y0], dtype=np.float64), np.array([vx, vy], dtype=np.float64)
+
+
+def _refine_corners_by_edges(
+    contour: np.ndarray, corners: tuple[tuple[int, int], ...]
+) -> tuple[tuple[int, int], ...]:
+    """Corners as the intersections of the four edge lines fitted to the contour.
+
+    A card has rounded corners and a blurred or shaded corner makes the contour cut it off, so the
+    polygon vertices sit a few pixels inside the real corner. The straight middle parts of the sides are
+    reliable: each side is fitted by a robust line and neighbouring lines are intersected. Anything that
+    moves a corner by more than ~7 % of the page's diagonal is not trusted (the original corners stay).
+    """
+    pts = contour.reshape(-1, 2).astype(np.float64)
+    quad = np.array(corners, dtype=np.float64)
+    diag = float(np.hypot(*(quad.max(axis=0) - quad.min(axis=0))))
+    if len(pts) < 16 or diag <= 0:
+        return corners
+    lines = []
+    for i in range(4):
+        a, b = quad[i], quad[(i + 1) % 4]
+        side = b - a
+        length = float(np.hypot(*side))
+        if length < 4:
+            return corners
+        unit = side / length
+        rel = pts - a
+        along = rel @ unit
+        across = np.abs(rel[:, 0] * unit[1] - rel[:, 1] * unit[0])
+        keep = (along > 0.15 * length) & (along < 0.85 * length) & (across < max(3.0, 0.04 * length))
+        if int(keep.sum()) < 6:
+            return corners
+        lines.append(_line_through(pts[keep]))
+    refined = []
+    for i in range(4):
+        p1, d1 = lines[(i - 1) % 4]
+        p2, d2 = lines[i]
+        det = d1[0] * (-d2[1]) - d1[1] * (-d2[0])
+        if abs(det) < 1e-3:
+            return corners
+        t = ((p2 - p1)[0] * (-d2[1]) - (p2 - p1)[1] * (-d2[0])) / det
+        point = p1 + t * d1
+        if float(np.hypot(*(point - quad[i]))) > 0.07 * diag:
+            return corners
+        refined.append(point)
+    out = tuple((int(round(x)), int(round(y))) for x, y in refined)
+    return out if cv2.isContourConvex(np.array(out, dtype=np.int32)) else corners
+
+
 def _contour_to_corners(contour: np.ndarray) -> tuple[tuple[int, int], ...]:
     peri = cv2.arcLength(contour, True)
     for eps in (0.02, 0.03, 0.05, 0.08):
         approx = cv2.approxPolyDP(contour, eps * peri, True)
         if len(approx) == 4 and cv2.isContourConvex(approx):
-            return order_corners(approx)
+            return _refine_corners_by_edges(contour, order_corners(approx))
     rect = cv2.minAreaRect(contour)
     return order_corners(cv2.boxPoints(rect))
 
