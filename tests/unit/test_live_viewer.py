@@ -381,6 +381,7 @@ class TestDetectorFrameIsolation:
             motion_threshold=5.0,
             edge_density_threshold=0.01,
             stable_frames_required=3,
+            detect_frames_required=3,
         )
         detector = DocumentDetector(config)
         baseline = np.full((240, 320, 3), 200, dtype=np.uint8)

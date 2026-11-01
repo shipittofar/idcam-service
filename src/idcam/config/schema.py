@@ -156,7 +156,7 @@ class DetectionConfig(BaseModel):
     removal_frames_required: int = Field(10, ge=2, le=120)
     # A document counts as present only after this many consecutive frames with an outline at or above
     # min_geometry_confidence. Raise both to react to fewer non-documents (hand, shadow, desk edge).
-    detect_frames_required: int = Field(3, ge=1, le=30)
+    detect_frames_required: int = Field(2, ge=1, le=30)
     lose_frames_required: int = Field(5, ge=1, le=60)
     lose_motion_factor: float = Field(0.55, gt=0, le=1.0)
     lose_edge_factor: float = Field(0.55, gt=0, le=2.0)
@@ -217,7 +217,7 @@ class QualityConfig(BaseModel):
     preview_focus_min_ratio: float = Field(1.15, gt=1.0, le=3.0)
     preview_focus_min_delta: float = Field(1.5, gt=0)
     min_sharpness: float = Field(80.0, gt=0)
-    min_document_sharpness: float = Field(40.0, gt=0)
+    min_document_sharpness: float = Field(32.0, gt=0)
     min_file_bytes: int = Field(100_000, gt=0)
     max_file_bytes: int = Field(50_000_000, gt=0)
     min_brightness: float = Field(30.0, ge=0, le=255)

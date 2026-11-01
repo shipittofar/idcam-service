@@ -317,8 +317,21 @@ class TestStabilitySensitivity:
         assert stable_old is False
 
     def test_real_movement_still_resets(self):
-        stable, sd = self._run(0.4, 22.0)  # above the relaxed threshold
+        stable, sd = self._run(0.4, 60.0)  # far above even the grown tolerance
         assert stable is False and sd.stable_count == 0
+
+    def test_the_longer_it_waits_the_more_movement_is_forgiven(self):
+        from unittest.mock import patch
+
+        cfg = DetectionConfig(motion_threshold=8.0, stable_frames_required=3, stability_sensitivity=1.0)
+        frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+        # 12 is above the base threshold (8) but below the fully grown one (16)
+        sd = StabilityDetector(cfg)
+        with patch("idcam.vision.stability_detector.structural_motion", return_value=12.0):
+            early = [sd.update(frame) for _ in range(4)]
+            late = [sd.update(frame) for _ in range(60)]
+        assert early[-1] is False
+        assert late[-1] is True
 
     def test_original_behaviour_is_available_with_sensitivity_one(self):
         _stable, sd = self._run(1.0, 0.0)

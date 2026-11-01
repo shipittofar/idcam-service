@@ -22,6 +22,12 @@ class StabilityDebug:
     stable: bool
 
 
+# The longer the wait for stability lasts, the more movement it forgives: a page that is held or slid about
+# settles slowly, and the same strict bar that suits a page lying still would keep it waiting for ever.
+_RELAX_FRAMES = 45  # frames (~3 s at 15 fps) over which the tolerance grows from x1 to x(1 + _RELAX_EXTRA)
+_RELAX_EXTRA = 1.0
+
+
 class StabilityDetector:
     """Tracks physical stability using AE-resistant structural motion on document ROI."""
 
@@ -34,8 +40,14 @@ class StabilityDetector:
         self._roi: tuple[int, int, int, int] | None = None
         self._hand = False  # skin next to the page: it is held, so a little tremor is not movement
         self._prev_corners: tuple[tuple[int, int], ...] | None = None
+        self._waited = 0  # frames judged since the wait began (grows the tolerance)
+
+    @property
+    def _relax(self) -> float:
+        return 1.0 + _RELAX_EXTRA * min(1.0, self._waited / _RELAX_FRAMES)
 
     def reset(self) -> None:
+        self._waited = 0
         self._stable_count = 0
         self._stable_latched = False
         self._prev_norm = None
@@ -86,7 +98,7 @@ class StabilityDetector:
             return False
         motion = corner_motion(previous, corners, robust=True)
         self._last_motion = motion
-        if motion < self.config.hand_corner_motion_px:
+        if motion < self.config.hand_corner_motion_px * self._relax:
             self._stable_count += 1
             if self._stable_count >= self.config.stable_frames_required:
                 self._stable_latched = True
@@ -97,6 +109,7 @@ class StabilityDetector:
 
     def update(self, frame: np.ndarray, corners: tuple[tuple[int, int], ...] | None = None) -> bool:
         """``corners`` (the page's outline in this frame) lets a page held in a hand be judged by pixels."""
+        self._waited += 1
         self._hand = self._hand_near_page(frame)
         if self._hand and corners is not None and len(corners) == 4:
             self._prev_norm = None  # the picture-difference path restarts if the hand leaves
@@ -114,7 +127,7 @@ class StabilityDetector:
         self._last_motion = motion
         self._prev_norm = norm
 
-        enter = self.effective_motion_threshold
+        enter = self.effective_motion_threshold * self._relax
         exit_threshold = enter * self.config.stability_exit_factor
 
         if motion < enter:
