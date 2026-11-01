@@ -152,7 +152,7 @@ class DetectionConfig(BaseModel):
     stable_frames_required: int = Field(5, ge=2, le=60)
     # 1.0 = the original motion tolerance; 0.6 = 40 % less sensitive to movement of the page
     # (the motion thresholds of the stability wait and of the pre-capture check are divided by it).
-    stability_sensitivity: float = Field(0.36, gt=0.1, le=1.0)
+    stability_sensitivity: float = Field(0.30, gt=0.1, le=1.0)
     removal_frames_required: int = Field(10, ge=2, le=120)
     # A document counts as present only after this many consecutive frames with an outline at or above
     # min_geometry_confidence. Raise both to react to fewer non-documents (hand, shadow, desk edge).

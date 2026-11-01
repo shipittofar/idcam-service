@@ -87,7 +87,7 @@ detection:
   # edge_zone_fraction: 0.18   # a clean page within this share of a border (not touching it) ...
   # edge_zone_relax: 0.08      # ... needs this much less confidence (softer, darker edges of the view)
   # background_min_diff: 10.0
-  stability_sensitivity: 0.36    # 1.0 = original motion tolerance; 0.36 = 64% less sensitive (threshold 8/0.36 = 22)
+  stability_sensitivity: 0.30    # 1.0 = original motion tolerance; 0.30 = 70% less sensitive (threshold 8/0.30 = 27)
   removal_frames_required: 10
   removal_motion_factor: 0.5
   removal_edge_factor: 0.5
